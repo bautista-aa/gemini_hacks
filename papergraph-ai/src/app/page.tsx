@@ -132,6 +132,21 @@ function isHexColor(value: string): boolean {
   return /^#(?:[0-9a-fA-F]{3}){1,2}$/.test(value.trim());
 }
 
+function getUploadBackendBaseUrl(): string {
+  const viteUrl =
+    typeof import.meta !== "undefined"
+      ? (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env
+          ?.VITE_BACKEND_URL
+      : undefined;
+
+  const backendUrl = (viteUrl ?? process.env.NEXT_PUBLIC_BACKEND_URL ?? "").trim();
+  if (!backendUrl) {
+    throw new Error("VITE_BACKEND_URL is not configured.");
+  }
+
+  return backendUrl.replace(/\/+$/, "");
+}
+
 export default function Home() {
   const [graphData, setGraphData] = useState<GraphData>(EMPTY_GRAPH);
   const [uploadedFiles, setUploadedFiles] = useState<File[]>([]);
@@ -263,7 +278,8 @@ export default function Home() {
       const formData = new FormData();
       uploadedFiles.forEach((file) => formData.append("files", file));
 
-      const response = await fetch("/api/extract", {
+      const backendBaseUrl = getUploadBackendBaseUrl();
+      const response = await fetch(`${backendBaseUrl}/upload`, {
         method: "POST",
         body: formData,
       });
