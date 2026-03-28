@@ -7,8 +7,8 @@ import {
   NODE_TYPES,
 } from "@/lib/types";
 
-const DEFAULT_GEMINI_MODEL = "gemini-3-flash-preview";
-const GEMINI_MODEL = process.env.GEMINI_MODEL?.trim() || DEFAULT_GEMINI_MODEL;
+/** Default to a model that works on standard Gemini API keys (AI Studio). */
+const DEFAULT_GEMINI_MODEL = "gemini-2.0-flash";
 const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
 const MAX_FILE_COUNT = 5;
 const MAX_TOTAL_BYTES = 18 * 1024 * 1024;
@@ -1214,10 +1214,13 @@ function mergeGraphEdges(graph: GraphData, additionalEdges: GraphEdge[]): GraphD
   };
 }
 
-async function callGemini(requestBody: object): Promise<GeminiResponse> {
-  const apiKey = getApiKey();
+async function callGeminiOnce(
+  apiKey: string,
+  model: string,
+  requestBody: object
+): Promise<GeminiResponse> {
   const response = await fetch(
-    `${GEMINI_API_BASE}/${GEMINI_MODEL}:generateContent?key=${apiKey}`,
+    `${GEMINI_API_BASE}/${model}:generateContent?key=${apiKey}`,
     {
       method: "POST",
       headers: {
@@ -1243,6 +1246,29 @@ async function callGemini(requestBody: object): Promise<GeminiResponse> {
   return payload;
 }
 
+async function callGemini(requestBody: object): Promise<GeminiResponse> {
+  const apiKey = getApiKey();
+  const models = getModelCandidates();
+  let lastError: Error | null = null;
+
+  for (const model of models) {
+    try {
+      return await callGeminiOnce(apiKey, model, requestBody);
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+      if (shouldRetryGeminiWithNextModel(error)) {
+        console.warn(`[gemini] Model "${model}" failed, trying next candidate…`);
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  throw lastError instanceof RouteError
+    ? lastError
+    : new RouteError(502, lastError?.message || "All Gemini models failed.");
+}
+
 function validatePdfFiles(files: File[]): void {
   if (files.length === 0) {
     throw new RouteError(400, "Upload at least one PDF.");
@@ -1261,8 +1287,12 @@ function validatePdfFiles(files: File[]): void {
   }
 
   for (const file of files) {
+    const name = file.name.toLowerCase();
     const isPdf =
-      file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf");
+      file.type === "application/pdf" ||
+      name.endsWith(".pdf") ||
+      (file.type === "application/octet-stream" && name.endsWith(".pdf")) ||
+      (file.type === "" && name.endsWith(".pdf"));
     if (!isPdf) {
       throw new RouteError(400, `${file.name} is not a PDF.`);
     }
@@ -1296,16 +1326,52 @@ async function buildFileParts(files: File[]): Promise<GeminiPart[]> {
 }
 
 
-function withThinkingConfig<T extends Record<string, unknown>>(
-  config: T,
-  thinkingLevel: ThinkingLevel
-): T & { thinkingConfig: { thinkingLevel: ThinkingLevel } } {
-  return {
-    ...config,
-    thinkingConfig: {
-      thinkingLevel,
-    },
-  };
+/**
+ * Thinking mode is only supported on some models. Sending thinkingConfig to others
+ * causes 400s and breaks extract. Opt in with GEMINI_THINKING=1.
+ */
+function buildGenerationConfig(
+  config: Record<string, unknown>,
+  thinkingLevel?: ThinkingLevel
+): Record<string, unknown> {
+  if (process.env.GEMINI_THINKING === "1" && thinkingLevel) {
+    return {
+      ...config,
+      thinkingConfig: { thinkingLevel },
+    };
+  }
+  return config;
+}
+
+function getModelCandidates(): string[] {
+  const fromEnv = process.env.GEMINI_MODEL?.trim();
+  const primary = fromEnv || DEFAULT_GEMINI_MODEL;
+  const fallbacks = [
+    "gemini-2.0-flash",
+    "gemini-2.0-flash-001",
+    "gemini-1.5-flash",
+    "gemini-1.5-flash-latest",
+  ];
+  const chain = [primary];
+  for (const m of fallbacks) {
+    if (m && !chain.includes(m)) chain.push(m);
+  }
+  return chain;
+}
+
+function shouldRetryGeminiWithNextModel(error: unknown): boolean {
+  if (!(error instanceof RouteError)) return false;
+  if (error.status === 404) return true;
+  if (error.status === 400) {
+    const m = error.message.toLowerCase();
+    return (
+      m.includes("not found") ||
+      m.includes("invalid model") ||
+      m.includes("was not found") ||
+      m.includes("does not exist")
+    );
+  }
+  return false;
 }
 
 
@@ -1341,7 +1407,7 @@ ${rawText}
         ],
       },
     ],
-    generationConfig: withThinkingConfig({
+    generationConfig: buildGenerationConfig({
       temperature: 0,
       maxOutputTokens: 8192,
       responseMimeType: "application/json",
@@ -1388,9 +1454,9 @@ CRITICAL: The graph must be DENSE with connections. Follow these rules:
         parts,
       },
     ],
-    generationConfig: withThinkingConfig({
-      temperature: 0.2,
-      maxOutputTokens: 16384,
+    generationConfig: buildGenerationConfig({
+      temperature: 0.1,
+      maxOutputTokens: 12288,
       responseMimeType: "application/json",
       responseSchema: GRAPH_RESPONSE_SCHEMA,
     }, "minimal"),
@@ -1461,9 +1527,9 @@ Edge context:
         ],
       },
     ],
-    generationConfig: withThinkingConfig({
-      temperature: 0.3,
-      maxOutputTokens: 512,
+    generationConfig: buildGenerationConfig({
+      temperature: 0.2,
+      maxOutputTokens: 384,
     }, "minimal"),
   });
 

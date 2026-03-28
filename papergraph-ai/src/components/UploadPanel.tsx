@@ -41,9 +41,14 @@ export default function UploadPanel({
     (e: DragEvent) => {
       e.preventDefault();
       setIsDragOver(false);
-      const files = Array.from(e.dataTransfer.files).filter((f) =>
-        f.type === "application/pdf"
-      );
+      const files = Array.from(e.dataTransfer.files).filter((f) => {
+        const n = f.name.toLowerCase();
+        return (
+          f.type === "application/pdf" ||
+          n.endsWith(".pdf") ||
+          (f.type === "application/octet-stream" && n.endsWith(".pdf"))
+        );
+      });
       if (files.length > 0) onFilesAdded(files);
     },
     [onFilesAdded]
@@ -63,7 +68,14 @@ export default function UploadPanel({
   // Handles manual file selection and resets the input afterward.
   const handleInputChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
-      const files = Array.from(e.target.files || []);
+      const files = Array.from(e.target.files || []).filter((f) => {
+        const n = f.name.toLowerCase();
+        return (
+          f.type === "application/pdf" ||
+          n.endsWith(".pdf") ||
+          (f.type === "application/octet-stream" && n.endsWith(".pdf"))
+        );
+      });
       if (files.length > 0) onFilesAdded(files);
       if (inputRef.current) inputRef.current.value = "";
     },

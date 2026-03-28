@@ -284,6 +284,7 @@ export default function GraphCanvas({
   const [hoveredLinkId, setHoveredLinkId] = useState<string | null>(null);
   const [activeDragNodeId, setActiveDragNodeId] = useState<string | null>(null);
   const [isDraggingNode, setIsDraggingNode] = useState(false);
+  const [exportBusy, setExportBusy] = useState(false);
 
   // refs mirror hover/drag/selection state so canvas paint callbacks stay stable
   const hoveredNodeIdRef = useRef<string | null>(null);
@@ -639,6 +640,29 @@ export default function GraphCanvas({
     setLayoutRevision((previous) => previous + 1);
   }, [layoutKey]);
 
+  const handleExportJpeg = useCallback(async () => {
+    const el = viewportRef.current;
+    if (!el || graphData.nodes.length === 0) return;
+    setExportBusy(true);
+    try {
+      const { default: html2canvas } = await import("html2canvas");
+      const canvas = await html2canvas(el, {
+        backgroundColor: "#050a18",
+        scale: 2,
+        useCORS: true,
+        logging: false,
+      });
+      const link = document.createElement("a");
+      link.download = `papergraph-${Date.now()}.jpg`;
+      link.href = canvas.toDataURL("image/jpeg", 0.92);
+      link.click();
+    } catch (err) {
+      console.error("[GraphCanvas] JPEG export failed", err);
+    } finally {
+      setExportBusy(false);
+    }
+  }, [graphData.nodes.length]);
+
   const nodeCanvasObject = useCallback(
     (
       rawNode: NodeObject<GraphNode>,
@@ -941,7 +965,15 @@ export default function GraphCanvas({
           <span className="text-[11px]">{graphData.edges.length}e</span>
         </div>
 
-        <div className="pointer-events-auto absolute right-4 top-4 flex items-center gap-2">
+        <div className="pointer-events-auto absolute right-4 top-4 flex flex-wrap items-center justify-end gap-2">
+          <button
+            type="button"
+            onClick={() => void handleExportJpeg()}
+            disabled={exportBusy}
+            className="rounded-full border border-emerald-accent/25 bg-emerald-accent/10 px-3 py-2 text-[11px] font-medium text-emerald-accent transition-all hover:border-emerald-accent/45 hover:bg-emerald-accent/15 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {exportBusy ? "Saving…" : "Save JPEG"}
+          </button>
           <button
             type="button"
             onClick={handleZoomToFit}

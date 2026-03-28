@@ -92,9 +92,9 @@ export async function POST(request: Request) {
       return NextResponse.json(fallback);
     }
 
-    return NextResponse.json(
-      { error: "Unexpected extract failure." },
-      { status: 500 }
-    );
+    console.error("[extract] unexpected error:", error);
+    const message =
+      error instanceof Error ? error.message : "Unexpected extract failure.";
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }

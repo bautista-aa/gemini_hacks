@@ -37,7 +37,7 @@ Set the values you actually use:
 GEMINI_API_KEY=
 GEMINI_LIVE_MODEL=gemini-3.1-flash-live-preview
 BACKEND_URL=http://localhost:8000
-GEMINI_MODEL=gemini-3-flash-preview
+GEMINI_MODEL=gemini-2.0-flash
 ```
 
 Notes:
@@ -45,7 +45,9 @@ Notes:
 - `GEMINI_API_KEY`
   - used by Next.js server-side extract and ask routes
 - `GEMINI_MODEL`
-  - optional override, default is already `gemini-3-flash-preview`
+  - optional override; default is `gemini-2.0-flash`. If the model name is invalid for your key, the server tries fallbacks automatically.
+- `GEMINI_THINKING`
+  - set to `1` only if your model supports `thinkingConfig`. Leaving it unset avoids 400 errors on models that reject thinking mode.
 - `GEMINI_LIVE_MODEL`
   - optional override for the secure Live session model
 - `BACKEND_URL`
@@ -72,6 +74,10 @@ cd ..\backend
 python -m uvicorn backend.main:app --reload --port 8000
 ```
 
+## Export graph image
+
+With a graph visible, use **Save JPEG** on the graph panel to download a `.jpg` snapshot of the workspace (uses `html2canvas`).
+
 ## Current Workflow
 
 1. Upload 1-5 PDFs.
@@ -88,9 +94,9 @@ Important:
 
 ## Current Models
 
-- extract / analyze PDFs: `gemini-3-flash-preview`
-- edge Q&A: `gemini-3-flash-preview`
-- secure Live: `gemini-3.1-flash-live-preview`
+- extract / analyze PDFs: `gemini-2.0-flash` by default (override with `GEMINI_MODEL`; server falls back if the name is invalid)
+- edge Q&A: same stack as extract
+- secure Live: `gemini-3.1-flash-live-preview` (see `GEMINI_LIVE_MODEL`)
 
 ## Architecture
 
