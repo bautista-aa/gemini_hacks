@@ -67,3 +67,7 @@
 Thumbs.db
 .vscode/
 .idea/
+
+# Legacy Vite frontend local artifacts
+/frontend/node_modules/
+/frontend/dist/
