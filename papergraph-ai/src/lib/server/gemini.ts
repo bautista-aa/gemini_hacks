@@ -7,8 +7,14 @@ import {
   NODE_TYPES,
 } from "@/lib/types";
 
-/** Default to a model that works on standard Gemini API keys (AI Studio). */
-const DEFAULT_GEMINI_MODEL = "gemini-2.0-flash";
+/** Hackathon / product default: Gemini 3 Flash only (no 2.x or 1.5 fallbacks). */
+const DEFAULT_GEMINI_MODEL = "gemini-3-flash-preview";
+
+const GEMINI_3_FLASH_FALLBACKS = [
+  "gemini-3-flash-preview",
+  "gemini-3-flash",
+  "gemini-3.0-flash-preview",
+] as const;
 const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
 const MAX_FILE_COUNT = 5;
 const MAX_TOTAL_BYTES = 18 * 1024 * 1024;
@@ -1346,13 +1352,18 @@ function buildGenerationConfig(
 function getModelCandidates(): string[] {
   const fromEnv = process.env.GEMINI_MODEL?.trim();
   const primary = fromEnv || DEFAULT_GEMINI_MODEL;
-  const fallbacks = [
-    "gemini-2.0-flash",
-    "gemini-2.0-flash-001",
-    "gemini-1.5-flash",
-    "gemini-1.5-flash-latest",
-  ];
-  const chain = [primary];
+
+  const fromListEnv = process.env.GEMINI_MODEL_FALLBACKS?.split(/[,;\s]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  const fallbacks =
+    fromListEnv && fromListEnv.length > 0
+      ? fromListEnv
+      : [...GEMINI_3_FLASH_FALLBACKS];
+
+  const chain: string[] = [];
+  if (primary) chain.push(primary);
   for (const m of fallbacks) {
     if (m && !chain.includes(m)) chain.push(m);
   }
