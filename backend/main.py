@@ -1,10 +1,19 @@
+from datetime import datetime
 from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List
+from typing import List, Optional
 import fitz
 import json
 from openai import OpenAI
+
+from .persistence import (
+    create_project,
+    upload_file_to_storage,
+    save_document,
+    save_graph,
+    save_qa_log,
+)
 
 app = FastAPI(title="PaperGraph AI Backend")
 openai_client = OpenAI()
@@ -129,19 +138,58 @@ mock_graph = GraphData(
 )
 
 current_graph: GraphData = mock_graph
+current_project_id: Optional[str] = None
+current_graph_id: Optional[str] = None
 
 @app.post("/upload", response_model=GraphData)
 async def upload_papers(files: List[UploadFile] = File(...)):
-    global current_graph
-    raw_text = await extract_text_from_files(files)
+    global current_graph, current_project_id, current_graph_id
+
+    project_title = f"PaperGraph upload {datetime.utcnow().isoformat()}"
+    project_id: Optional[str] = None
+    try:
+        # Postgres: create a new project/session record for this upload flow
+        project_id = create_project(title=project_title)
+        current_project_id = project_id
+    except Exception as exc:
+        print(f"Supabase project creation failed: {exc}")
+
+    raw_texts: List[str] = []
+    for file in files:
+        contents = await file.read()
+        raw_text = extract_text_from_pdf_bytes(contents)
+        raw_texts.append(raw_text)
+
+        if project_id:
+            try:
+                # Storage: upload the raw PDF file bytes to Supabase Storage
+                storage_path = upload_file_to_storage(project_id, file.filename, contents)
+                # Postgres: persist the uploaded document metadata and extracted raw text
+                save_document(project_id, file.filename, storage_path, raw_text)
+            except Exception as exc:
+                print(f"Supabase document persistence failed: {exc}")
+
+    raw_text = "\n\n".join(raw_texts)
     print(f"Extracted text from {len(files)} PDF(s), total length={len(raw_text)} characters")
+
     try:
         graph_data = call_gemini_extract_graph(raw_text)
         current_graph = graph_data
+        if project_id:
+            try:
+                # Postgres: persist the generated graph JSON for later lookup
+                current_graph_id = save_graph(project_id, graph_data.json(), status="ready")
+            except Exception as exc:
+                print(f"Supabase graph persistence failed: {exc}")
         return graph_data
     except Exception as exc:
         print(f"Gemini extraction failed: {exc}")
         current_graph = mock_graph
+        if project_id:
+            try:
+                current_graph_id = save_graph(project_id, mock_graph.json(), status="failed")
+            except Exception as exc:
+                print(f"Supabase fallback graph persistence failed: {exc}")
         return mock_graph
 
 @app.get("/graph", response_model=GraphData)
@@ -174,4 +222,18 @@ def ask_question(request: AskRequest):
         max_output_tokens=300,
     )
     answer_text = extract_text_from_response(response).strip()
+
+    if current_graph_id:
+        try:
+            # Postgres: persist the live Q&A event for the current graph edge context
+            save_qa_log(
+                graph_id=current_graph_id,
+                edge_source=request.source,
+                edge_target=request.target,
+                question=request.question,
+                answer=answer_text,
+            )
+        except Exception as exc:
+            print(f"Supabase QA persistence failed: {exc}")
+
     return AskResponse(answer=answer_text)
