@@ -4,6 +4,7 @@ interface WorkflowOverviewProps {
   queuedCount: number;
   isProcessing: boolean;
   hasGraph: boolean;
+  isCurrentGraphSaved: boolean;
   isCollapsed: boolean;
   onToggleCollapse: () => void;
 }
@@ -68,14 +69,12 @@ const STEPS = [
   {
     number: "5",
     title: "Explain And Listen",
-    description: "Gemini explains the selected idea while the browser can read it aloud.",
+    description: "Open the right-side voice panel to talk through graph links, tensions, and missing explanations.",
     accent: "from-sky-400/30 to-sky-400/5",
     border: "border-sky-400/25",
     icon: (
       <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-        <polygon points="11 5 6 9 3 9 3 15 6 15 11 19 11 5" />
-        <path d="M15.5 8.5a5 5 0 0 1 0 7" />
-        <path d="M18.5 5.5a9 9 0 0 1 0 13" />
+        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
       </svg>
     ),
   },
@@ -85,6 +84,7 @@ export default function WorkflowOverview({
   queuedCount,
   isProcessing,
   hasGraph,
+  isCurrentGraphSaved,
   isCollapsed,
   onToggleCollapse,
 }: WorkflowOverviewProps) {
@@ -92,8 +92,10 @@ export default function WorkflowOverview({
     ? "Gemini is analyzing the queue"
     : queuedCount > 0
     ? `${queuedCount} paper${queuedCount > 1 ? "s" : ""} queued for extraction`
+    : hasGraph && isCurrentGraphSaved
+    ? "Current graph saved to your library"
     : hasGraph
-    ? "Graph ready for exploration"
+    ? "Graph ready to save and explore"
     : "Upload papers to start the pipeline";
 
   return (
@@ -113,7 +115,7 @@ export default function WorkflowOverview({
             </h2>
             {!isCollapsed && (
               <p className="mt-2 max-w-3xl text-sm text-cyan-accent/80">
-                See the connections, inspect the evidence, and listen to Gemini&apos;s explanation.
+                Shape the graph in your workspace, save clean snapshots, and use secure Live without exposing the API key to the browser.
               </p>
             )}
           </div>

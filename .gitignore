@@ -27,15 +27,40 @@
 **/*credentials*.json
 **/secrets/
 
+# Python backend: bytecode and caches
+/backend/__pycache__/
+/backend/**/__pycache__/
+/backend/*.pyc
+/backend/**/*.pyc
+/backend/.venv/
+/backend/venv/
+/backend/env/
+
+# Python backend: uploaded PDFs and temp files
+/backend/uploads/
+/backend/tmp/
+/backend/.pytest_cache/
+
 # Deployment metadata
 /papergraph-ai/.vercel/
+/papergraph-ai/.codex-next.err
+/papergraph-ai/coverage/
 
 # Local project notes
 /CLAUDE.md
 /FRONTEND-CONTEXT.md
 /BACKEND-CONTEXT.md
 /PROJECT-CONTEXT.md
+/LIVECHAT-FIXES.md
 /papergraph-ai/.codebase-map.md
+
+# Local agent state
+/.claude/
+
+# Test and coverage artifacts
+/.coverage
+/htmlcov/
+/.pytest_cache/
 
 # Editor / OS noise
 .DS_Store

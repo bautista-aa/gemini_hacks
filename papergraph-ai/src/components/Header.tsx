@@ -6,23 +6,25 @@ type HeaderTab = "current" | "history";
 interface HeaderProps {
   activeTab: HeaderTab;
   historyCount: number;
-  canArchiveCurrent: boolean;
+  canSaveCurrent: boolean;
+  isCurrentSaved: boolean;
   onTabChange: (tab: HeaderTab) => void;
-  onArchiveCurrent: () => void;
+  onSaveCurrent: () => void;
 }
 
 export default function Header({
   activeTab,
   historyCount,
-  canArchiveCurrent,
+  canSaveCurrent,
+  isCurrentSaved,
   onTabChange,
-  onArchiveCurrent,
+  onSaveCurrent,
 }: HeaderProps) {
   return (
-    <header className="flex items-center justify-between px-6 h-14 border-b border-gray-800 bg-gray-950/80 backdrop-blur-sm shrink-0">
-      <div className="flex items-center gap-3">
+    <header className="flex h-16 shrink-0 items-center justify-between border-b border-gray-800/80 bg-[linear-gradient(90deg,rgba(4,10,24,0.96),rgba(7,16,36,0.92),rgba(5,12,28,0.96))] px-6 backdrop-blur-sm">
+      <div className="flex items-center gap-4">
         {/* Gradient logo icon rendered as an inline SVG. */}
-        <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-cyan-accent to-violet-accent flex items-center justify-center">
+        <div className="flex h-9 w-9 items-center justify-center rounded-xl border border-cyan-accent/25 bg-gradient-to-br from-cyan-accent via-sky-400 to-emerald-accent shadow-[0_10px_28px_rgba(34,211,238,0.24)]">
           <svg
             width="18"
             height="18"
@@ -45,12 +47,17 @@ export default function Header({
           </svg>
         </div>
         {/* Product title with gradient-highlighted brand text. */}
-        <h1 className="text-lg font-semibold tracking-tight">
-          <span className="bg-gradient-to-r from-cyan-accent to-violet-accent bg-clip-text text-transparent">
-            PaperGraph
-          </span>{" "}
-          <span className="text-gray-400 font-normal">AI</span>
-        </h1>
+        <div>
+          <p className="text-[10px] font-semibold uppercase tracking-[0.28em] text-cyan-accent/75">
+            Research Workspace
+          </p>
+          <h1 className="text-lg font-semibold tracking-tight">
+            <span className="bg-gradient-to-r from-cyan-accent via-sky-300 to-emerald-accent bg-clip-text text-transparent">
+              PaperGraph
+            </span>{" "}
+            <span className="font-normal text-gray-400">AI</span>
+          </h1>
+        </div>
       </div>
       <div className="flex items-center gap-2">
         <button
@@ -77,7 +84,7 @@ export default function Header({
             <rect x="3" y="14" width="7" height="7" rx="1" />
             <rect x="14" y="14" width="7" height="7" rx="1" />
           </svg>
-          <span>Current</span>
+          <span>Workspace</span>
         </button>
 
         <button
@@ -105,7 +112,7 @@ export default function Header({
             <line x1="12" y1="7" x2="12" y2="12" />
             <line x1="12" y1="12" x2="15" y2="14" />
           </svg>
-          <span>History</span>
+          <span>Saved</span>
           <span className="rounded-full bg-gray-800 px-1.5 text-xs text-gray-400">
             {historyCount}
           </span>
@@ -113,9 +120,15 @@ export default function Header({
 
         <button
           type="button"
-          onClick={onArchiveCurrent}
-          disabled={!canArchiveCurrent}
-          className="inline-flex items-center gap-2 rounded-lg border border-amber-accent/30 bg-amber-accent/10 px-3 py-1.5 text-sm text-amber-accent transition-colors duration-200 hover:border-amber-accent/45 hover:bg-amber-accent/15 disabled:cursor-not-allowed disabled:opacity-40"
+          onClick={onSaveCurrent}
+          disabled={!canSaveCurrent}
+          className={`inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-medium transition-all duration-200 ${
+            canSaveCurrent
+              ? "border-emerald-accent/35 bg-gradient-to-r from-emerald-accent/18 via-cyan-accent/14 to-sky-400/14 text-emerald-accent shadow-[0_10px_28px_rgba(52,211,153,0.14)] hover:border-emerald-accent/55 hover:from-emerald-accent/24 hover:to-sky-400/20"
+              : isCurrentSaved
+              ? "border-emerald-accent/20 bg-emerald-accent/10 text-emerald-accent/75"
+              : "border-gray-700 bg-gray-900 text-gray-500"
+          } disabled:cursor-not-allowed`}
         >
           <svg
             width="14"
@@ -127,11 +140,11 @@ export default function Header({
             strokeLinecap="round"
             strokeLinejoin="round"
           >
-            <path d="M21 8v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8" />
-            <path d="M1 3h22v5H1z" />
-            <path d="M10 12h4" />
+            <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" />
+            <path d="M17 21v-8H7v8" />
+            <path d="M7 3v5h8" />
           </svg>
-          <span>Archive Current</span>
+          <span>{isCurrentSaved ? "Saved" : "Save Snapshot"}</span>
         </button>
       </div>
     </header>

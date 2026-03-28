@@ -2,7 +2,11 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import dynamic from "next/dynamic";
-import type { LinkObject, NodeObject } from "react-force-graph-2d";
+import type {
+  ForceGraphMethods,
+  LinkObject,
+  NodeObject,
+} from "react-force-graph-2d";
 import { GraphData, GraphEdge, GraphNode, NODE_COLORS } from "@/lib/types";
 import EmptyState from "./EmptyState";
 
@@ -21,6 +25,9 @@ interface GraphCanvasProps {
 
 type ForceNode = NodeObject<GraphNode>;
 type ForceLink = LinkObject<GraphNode, GraphEdge> & GraphEdge;
+type ForceGraphHandle = ForceGraphMethods<GraphNode, GraphEdge>;
+type ManyBodyForce = { strength: (value: number) => ManyBodyForce };
+type LinkForceController = { distance: (value: number) => LinkForceController };
 type PinnedPosition = { x: number; y: number };
 type LegendItem = {
   colorHex: string;
@@ -45,7 +52,47 @@ function getEndpointId(endpoint: ForceLink["source"] | ForceLink["target"]): str
 }
 
 function getLinkId(link: ForceLink): string {
-  return `${getEndpointId(link.source)}::${getEndpointId(link.target)}`;
+  return `${getEndpointId(link.source)}::${getEndpointId(link.target)}::${link.relation || ""}`;
+}
+
+function getNodeId(rawNode: NodeObject<GraphNode> | null): string | null {
+  if (!rawNode) return null;
+  if (typeof rawNode.id === "string") return rawNode.id;
+  if (typeof rawNode.id === "number") return String(rawNode.id);
+  return null;
+}
+
+function resolveForceNode(endpoint: ForceLink["source"] | ForceLink["target"]): ForceNode | null {
+  if (!endpoint || typeof endpoint !== "object" || !("x" in endpoint)) return null;
+  return endpoint as ForceNode;
+}
+
+function buildLayoutKey(graphData: GraphData): string {
+  const nodeSignature = graphData.nodes
+    .map((node) => node.id)
+    .sort()
+    .join("|");
+  const edgeSignature = graphData.edges
+    .map((edge) => `${edge.source}->${edge.target}:${edge.relation}`)
+    .sort()
+    .join("|");
+
+  return `${nodeSignature}__${edgeSignature}`;
+}
+
+function buildForceData(
+  graphData: GraphData,
+  pinnedLayout: Record<string, PinnedPosition> = {}
+): { nodes: ForceNode[]; links: ForceLink[] } {
+  return {
+    nodes: graphData.nodes.map((node) => {
+      const pinned = pinnedLayout[node.id];
+      return pinned
+        ? ({ ...node, x: pinned.x, y: pinned.y, fx: pinned.x, fy: pinned.y } as ForceNode)
+        : ({ ...node } as ForceNode);
+    }),
+    links: graphData.edges.map((edge) => ({ ...edge })) as ForceLink[],
+  };
 }
 
 function getNodeColor(node: GraphNode): string {
@@ -153,9 +200,30 @@ export default function GraphCanvas({
   emptyMessage = "Upload papers to generate a knowledge graph",
 }: GraphCanvasProps) {
   const viewportRef = useRef<HTMLDivElement>(null);
+  const graphRef = useRef<ForceGraphHandle | undefined>(undefined);
+  const pinnedLayoutsRef = useRef<Record<string, Record<string, PinnedPosition>>>({});
+  const draggingNodeIdRef = useRef<string | null>(null);
   const [dimensions, setDimensions] = useState({ width: 800, height: 600 });
-  const [pinnedPositions, setPinnedPositions] = useState<Record<string, PinnedPosition>>({});
   const [isLegendExpanded, setIsLegendExpanded] = useState(false);
+  const [pinnedLayouts, setPinnedLayouts] = useState<Record<string, Record<string, PinnedPosition>>>({});
+  const [layoutRevision, setLayoutRevision] = useState(0);
+  const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
+  const [hoveredLinkId, setHoveredLinkId] = useState<string | null>(null);
+  const [activeDragNodeId, setActiveDragNodeId] = useState<string | null>(null);
+  const [isDraggingNode, setIsDraggingNode] = useState(false);
+
+  // refs mirror hover/drag/selection state so canvas paint callbacks stay stable
+  const hoveredNodeIdRef = useRef<string | null>(null);
+  const hoveredLinkIdRef = useRef<string | null>(null);
+  const selectedNodeIdRef = useRef<string | null>(null);
+  const activeDragNodeIdRef = useRef<string | null>(null);
+  const selectedEdgeIdRef = useRef<string | null>(null);
+
+  const layoutKey = useMemo(() => buildLayoutKey(graphData), [graphData]);
+  const activePinnedLayout = useMemo(
+    () => pinnedLayouts[layoutKey] || {},
+    [layoutKey, pinnedLayouts]
+  );
 
   useEffect(() => {
     if (!viewportRef.current) return;
@@ -172,25 +240,130 @@ export default function GraphCanvas({
     return () => observer.disconnect();
   }, []);
 
+  useEffect(() => {
+    const nodeIds = new Set(graphData.nodes.map((node) => node.id));
+    const pinnedLayout = pinnedLayoutsRef.current[layoutKey];
+
+    if (pinnedLayout) {
+      Object.keys(pinnedLayout).forEach((nodeId) => {
+        if (!nodeIds.has(nodeId)) {
+          delete pinnedLayout[nodeId];
+        }
+      });
+    }
+
+    draggingNodeIdRef.current = null;
+  }, [graphData.nodes, layoutKey]);
+
+  useEffect(() => {
+    if (!graphData.nodes.length) return;
+
+    const timeoutId = window.setTimeout(() => {
+      graphRef.current?.zoomToFit(500, 112);
+    }, 180);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [graphData.nodes.length, layoutKey, layoutRevision]);
+
+  useEffect(() => {
+    if (!graphData.nodes.length) return;
+
+    const timeoutId = window.setTimeout(() => {
+      const graph = graphRef.current;
+      if (!graph) return;
+
+      const nodeCount = graphData.nodes.length;
+      const linkCount = graphData.edges.length;
+      const linkDistance = Math.min(
+        180,
+        Math.max(60, 70 + Math.sqrt(nodeCount) * 8 - Math.min(linkCount, 40) * 0.6)
+      );
+      const chargeStrength = -Math.min(
+        500,
+        Math.max(180, 200 + nodeCount * 6 - Math.min(linkCount, nodeCount * 2) * 1.5)
+      );
+
+      (graph.d3Force("link") as LinkForceController | undefined)?.distance?.(linkDistance);
+      (graph.d3Force("charge") as ManyBodyForce | undefined)?.strength?.(chargeStrength);
+      graph.d3ReheatSimulation();
+    }, 120);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [graphData.edges.length, graphData.nodes.length, layoutRevision]);
+
+  const pinNodePosition = useCallback(
+    (nodeId: string, x: number, y: number, syncState = false) => {
+      if (!nodeId || !Number.isFinite(x) || !Number.isFinite(y)) return;
+      const nextLayout = {
+        ...(pinnedLayoutsRef.current[layoutKey] || {}),
+        [nodeId]: { x, y },
+      };
+      pinnedLayoutsRef.current = {
+        ...pinnedLayoutsRef.current,
+        [layoutKey]: nextLayout,
+      };
+      if (syncState) {
+        setPinnedLayouts((previous) => ({
+          ...previous,
+          [layoutKey]: nextLayout,
+        }));
+      }
+    },
+    [layoutKey]
+  );
+
+  // only rebuild force data when the graph itself changes or on layout remix,
+  // NOT on every pinned position update — that causes re-render loops / zoom glitches
+  const initialPinnedRef = useRef<Record<string, PinnedPosition>>({});
+  useEffect(() => {
+    initialPinnedRef.current = pinnedLayoutsRef.current[layoutKey] || {};
+  }, [layoutKey, layoutRevision]);
+
   const forceData = useMemo(
-    () => ({
-      nodes: graphData.nodes.map((node) => {
-        const pinned = pinnedPositions[node.id];
-        return pinned
-          ? ({ ...node, x: pinned.x, y: pinned.y, fx: pinned.x, fy: pinned.y } as ForceNode)
-          : ({ ...node } as ForceNode);
-      }),
-      links: graphData.edges.map((edge) => ({ ...edge })) as ForceLink[],
-    }),
-    [graphData, pinnedPositions]
+    () => buildForceData(graphData, initialPinnedRef.current),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [graphData, layoutKey, layoutRevision]
   );
 
   const legendItems = useMemo(() => buildLegendItems(graphData.nodes), [graphData.nodes]);
   const selectedId = selectedEdge
-    ? `${selectedEdge.source}::${selectedEdge.target}`
+    ? `${selectedEdge.source}::${selectedEdge.target}::${selectedEdge.relation}`
     : null;
   const selectedNodeId = selectedNode?.id ?? null;
   const compactLegendItems = legendItems.slice(0, 3);
+  const hoveredNode = hoveredNodeId
+    ? graphData.nodes.find((node) => node.id === hoveredNodeId) ?? null
+    : null;
+  const hoveredLink = hoveredLinkId
+    ? graphData.edges.find(
+        (edge) =>
+          `${edge.source}::${edge.target}::${edge.relation}` === hoveredLinkId
+      ) ?? null
+    : null;
+  const activeDragNode = activeDragNodeId
+    ? graphData.nodes.find((node) => node.id === activeDragNodeId) ?? null
+    : null;
+  const effectiveHoveredNodeId = hoveredNode ? hoveredNodeId : null;
+  const effectiveHoveredLinkId = hoveredLink ? hoveredLinkId : null;
+  const effectiveActiveDragNodeId = isDraggingNode && activeDragNode ? activeDragNodeId : null;
+
+  // keep refs in sync so canvas paint reads current state without deps
+  hoveredNodeIdRef.current = effectiveHoveredNodeId;
+  hoveredLinkIdRef.current = effectiveHoveredLinkId;
+  selectedNodeIdRef.current = selectedNodeId;
+  activeDragNodeIdRef.current = effectiveActiveDragNodeId;
+  selectedEdgeIdRef.current = selectedId;
+  const interactionLabel = effectiveActiveDragNodeId && activeDragNode
+    ? `Dragging ${getNodeLabel(activeDragNode)}`
+    : hoveredNode
+    ? `Hovering ${getNodeLabel(hoveredNode)}`
+    : hoveredLink
+    ? `Tracing ${hoveredLink.relation}`
+    : selectedEdge
+    ? "Connection selected"
+    : selectedNode
+    ? "Node selected"
+    : "Freeform constellation";
 
   const handleLinkClick = useCallback(
     (rawLink: LinkObject<GraphNode, GraphEdge>) => {
@@ -229,19 +402,128 @@ export default function GraphCanvas({
     [onNodeClick]
   );
 
-  const handleNodeDragEnd = useCallback((rawNode: NodeObject<GraphNode>) => {
-    const node = rawNode as ForceNode;
-    const id = String(node.id ?? "");
-    const x = node.x ?? 0;
-    const y = node.y ?? 0;
-
-    node.fx = x;
-    node.fy = y;
-    setPinnedPositions((previous) => ({
-      ...previous,
-      [id]: { x, y },
-    }));
+  const handleNodeHover = useCallback((rawNode: NodeObject<GraphNode> | null) => {
+    setHoveredNodeId(getNodeId(rawNode));
+    if (rawNode) {
+      setHoveredLinkId(null);
+    }
   }, []);
+
+  const handleLinkHover = useCallback(
+    (rawLink: LinkObject<GraphNode, GraphEdge> | null) => {
+      setHoveredLinkId(rawLink ? getLinkId(rawLink as ForceLink) : null);
+      if (rawLink) {
+        setHoveredNodeId(null);
+      }
+    },
+    []
+  );
+
+  const handleNodeDrag = useCallback(
+    (rawNode: NodeObject<GraphNode>) => {
+      const node = rawNode as ForceNode;
+      const id = String(node.id ?? "");
+      const x = node.x ?? 0;
+      const y = node.y ?? 0;
+
+      if (!id) return;
+
+      if (draggingNodeIdRef.current !== id) {
+        draggingNodeIdRef.current = id;
+        setActiveDragNodeId(id);
+        setIsDraggingNode(true);
+      }
+
+      node.fx = x;
+      node.fy = y;
+      pinNodePosition(id, x, y, false);
+    },
+    [pinNodePosition]
+  );
+
+  const handleNodeDragEnd = useCallback(
+    (rawNode: NodeObject<GraphNode>) => {
+      const node = rawNode as ForceNode;
+      const id = String(node.id ?? "");
+      const x = node.x ?? 0;
+      const y = node.y ?? 0;
+
+      if (!id) return;
+
+      node.fx = x;
+      node.fy = y;
+      pinNodePosition(id, x, y, true);
+      draggingNodeIdRef.current = null;
+      setActiveDragNodeId(null);
+      setIsDraggingNode(false);
+    },
+    [pinNodePosition]
+  );
+
+  const handleEngineStop = useCallback(() => {
+    const graph = graphRef.current;
+    if (!graph) return;
+
+    const nextPinnedLayout = { ...(pinnedLayoutsRef.current[layoutKey] || {}) };
+    let changed = false;
+
+    forceData.nodes.forEach((rawNode) => {
+      const node = rawNode as ForceNode;
+      const id = String(node.id ?? "");
+      const x = node.x;
+      const y = node.y;
+
+      if (
+        !id ||
+        typeof x !== "number" ||
+        typeof y !== "number" ||
+        !Number.isFinite(x) ||
+        !Number.isFinite(y)
+      ) {
+        return;
+      }
+
+      const prev = nextPinnedLayout[id];
+      if (prev && Math.abs(prev.x - x) < 0.5 && Math.abs(prev.y - y) < 0.5) {
+        return;
+      }
+
+      node.fx = x;
+      node.fy = y;
+      nextPinnedLayout[id] = { x, y };
+      changed = true;
+    });
+
+    if (!changed) return;
+
+    pinnedLayoutsRef.current = {
+      ...pinnedLayoutsRef.current,
+      [layoutKey]: nextPinnedLayout,
+    };
+    setPinnedLayouts((previous) => ({
+      ...previous,
+      [layoutKey]: nextPinnedLayout,
+    }));
+  }, [forceData.nodes, layoutKey]);
+
+  const handleZoomToFit = useCallback(() => {
+    graphRef.current?.zoomToFit(450, 112);
+  }, []);
+
+  const handleRemixLayout = useCallback(() => {
+    delete pinnedLayoutsRef.current[layoutKey];
+    draggingNodeIdRef.current = null;
+    setHoveredNodeId(null);
+    setHoveredLinkId(null);
+    setActiveDragNodeId(null);
+    setIsDraggingNode(false);
+    setPinnedLayouts((previous) => {
+      const nextLayouts = { ...previous };
+      delete nextLayouts[layoutKey];
+      return nextLayouts;
+    });
+    setLayoutRevision((previous) => previous + 1);
+  }, [layoutKey]);
 
   const nodeCanvasObject = useCallback(
     (rawNode: NodeObject<GraphNode>, ctx: CanvasRenderingContext2D) => {
@@ -249,57 +531,151 @@ export default function GraphCanvas({
       const x = node.x ?? 0;
       const y = node.y ?? 0;
       const nodeId = String(node.id ?? "");
-      const isSelected = selectedNodeId === nodeId;
+      // read interaction state from refs to avoid re-creating this callback on hover
+      const isSelected = selectedNodeIdRef.current === nodeId;
+      const isHovered = hoveredNodeIdRef.current === nodeId;
+      const isDragging = activeDragNodeIdRef.current === nodeId;
       const isPaperNode = Boolean(node.paperLabel);
-      const radius = isPaperNode ? (isSelected ? 9 : 7.5) : isSelected ? 7.5 : 6;
       const color = getNodeColor(node);
       const labelLines = wrapNodeLabel(getNodeLabel(node));
-      const fontSize = isPaperNode ? 4.4 : 3.8;
-      const lineHeight = fontSize + 1.4;
+      const active = isHovered || isSelected || isDragging;
 
-      ctx.beginPath();
-      ctx.arc(x, y, radius + 6, 0, 2 * Math.PI);
-      ctx.fillStyle = isSelected ? "#22d3ee2a" : `${color}22`;
-      ctx.fill();
+      if (isPaperNode) {
+        // -- PAPER NODE: large colored circle, clearly distinguishable --
+        const r = 9 + (active ? 1.5 : 0);
 
-      ctx.beginPath();
-      ctx.arc(x, y, radius + 2.5, 0, 2 * Math.PI);
-      ctx.fillStyle = `${color}18`;
-      ctx.fill();
+        // outer glow ring
+        ctx.beginPath();
+        ctx.arc(x, y, r + 3, 0, 2 * Math.PI);
+        ctx.lineWidth = 1.2;
+        ctx.strokeStyle = `${color}40`;
+        ctx.stroke();
 
-      ctx.beginPath();
-      ctx.arc(x, y, radius, 0, 2 * Math.PI);
-      ctx.fillStyle = color;
-      ctx.fill();
+        // strong glow
+        ctx.shadowColor = color;
+        ctx.shadowBlur = active ? 20 : 12;
 
-      ctx.lineWidth = isSelected ? 1.1 : 0.75;
-      ctx.strokeStyle = isSelected ? "#d8f6ff" : `${color}aa`;
-      ctx.stroke();
+        // filled circle with the paper's theme color
+        ctx.beginPath();
+        ctx.arc(x, y, r, 0, 2 * Math.PI);
+        ctx.fillStyle = color;
+        ctx.fill();
+        ctx.shadowBlur = 0;
 
-      ctx.font = `${isPaperNode ? 600 : 500} ${fontSize}px sans-serif`;
-      const maxTextWidth = Math.max(...labelLines.map((line) => ctx.measureText(line).width));
-      const boxWidth = maxTextWidth + 6;
-      const boxHeight = labelLines.length * lineHeight + 4;
-      const boxX = x - boxWidth / 2;
-      const boxY = y + radius + 4;
+        // border
+        ctx.lineWidth = isSelected ? 2 : active ? 1.4 : 1;
+        ctx.strokeStyle = isSelected ? "#ffffff" : isDragging ? "#ffffff" : `${color}ee`;
+        ctx.stroke();
 
-      drawRoundedRect(ctx, boxX, boxY, boxWidth, boxHeight, 3);
-      ctx.fillStyle = "rgba(3, 7, 18, 0.88)";
-      ctx.fill();
-      ctx.lineWidth = 0.5;
-      ctx.strokeStyle = isPaperNode ? `${color}66` : "rgba(148, 163, 184, 0.25)";
-      ctx.stroke();
+        // white doc icon inside the circle
+        const iconW = r * 0.55;
+        const iconTop = y - iconW * 0.5;
+        for (let i = 0; i < 3; i++) {
+          const lY = iconTop + i * 2.6;
+          const lW = i === 2 ? iconW * 0.6 : iconW;
+          ctx.beginPath();
+          ctx.moveTo(x - lW / 2, lY);
+          ctx.lineTo(x + lW / 2, lY);
+          ctx.lineWidth = 1.2;
+          ctx.strokeStyle = "rgba(255,255,255,0.85)";
+          ctx.stroke();
+        }
 
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      ctx.fillStyle = "#e5e7eb";
+        // label below
+        const fontSize = 4.2 + (active ? 0.2 : 0);
+        const lineHeight = fontSize + 1.6;
+        ctx.font = `600 ${fontSize}px sans-serif`;
+        const maxTW = Math.max(...labelLines.map((l) => ctx.measureText(l).width));
+        const boxW = maxTW + 7;
+        const boxH = labelLines.length * lineHeight + 4.5;
+        const boxX = x - boxW / 2;
+        const boxY = y + r + 4;
 
-      labelLines.forEach((line, index) => {
-        const lineY = boxY + 3 + lineHeight / 2 + index * lineHeight;
-        ctx.fillText(line, x, lineY);
-      });
+        drawRoundedRect(ctx, boxX, boxY, boxW, boxH, 3);
+        ctx.fillStyle = "rgba(6, 12, 28, 0.92)";
+        ctx.fill();
+        ctx.lineWidth = active ? 0.7 : 0.45;
+        ctx.strokeStyle = isSelected ? "#67e8f9aa" : `${color}55`;
+        ctx.stroke();
+
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillStyle = "#e2e8f0";
+        labelLines.forEach((line, i) => {
+          ctx.fillText(line, x, boxY + 3 + lineHeight / 2 + i * lineHeight);
+        });
+      } else {
+        // -- TOPIC/CONCEPT NODE: smaller dot, these are the key connectors --
+        const r = 4 + (isHovered ? 0.5 : 0) + (isSelected ? 0.7 : 0) + (isDragging ? 0.4 : 0);
+
+        // glow
+        ctx.shadowColor = color;
+        ctx.shadowBlur = active ? 10 : 5;
+        ctx.beginPath();
+        ctx.arc(x, y, r, 0, 2 * Math.PI);
+        ctx.fillStyle = color;
+        ctx.fill();
+        ctx.shadowBlur = 0;
+
+        if (active) {
+          ctx.lineWidth = isSelected ? 1 : 0.7;
+          ctx.strokeStyle = isSelected ? "#d8f6ff" : isDragging ? "#ffffff" : `${color}bb`;
+          ctx.stroke();
+        }
+
+        // label
+        const fontSize = 3.6 + (active ? 0.2 : 0);
+        const lineHeight = fontSize + 1.4;
+        ctx.font = `500 ${fontSize}px sans-serif`;
+        const maxTW = Math.max(...labelLines.map((l) => ctx.measureText(l).width));
+        const boxW = maxTW + 6;
+        const boxH = labelLines.length * lineHeight + 4;
+        const boxX = x - boxW / 2;
+        const boxY = y + r + 3;
+
+        drawRoundedRect(ctx, boxX, boxY, boxW, boxH, 2.5);
+        ctx.fillStyle = "rgba(5, 10, 24, 0.88)";
+        ctx.fill();
+        if (active) {
+          ctx.lineWidth = 0.5;
+          ctx.strokeStyle = isSelected ? "#67e8f9aa" : `${color}44`;
+          ctx.stroke();
+        }
+
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillStyle = "#cbd5e1";
+        labelLines.forEach((line, i) => {
+          ctx.fillText(line, x, boxY + 2.5 + lineHeight / 2 + i * lineHeight);
+        });
+      }
     },
-    [selectedNodeId]
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    []
+  );
+
+  const linkPointerAreaPaint = useCallback(
+    (
+      rawLink: LinkObject<GraphNode, GraphEdge>,
+      color: string,
+      ctx: CanvasRenderingContext2D
+    ) => {
+      const link = rawLink as ForceLink;
+      const sourceNode = resolveForceNode(link.source);
+      const targetNode = resolveForceNode(link.target);
+
+      if (!sourceNode || !targetNode) return;
+
+      const linkId = getLinkId(link);
+      ctx.beginPath();
+      ctx.moveTo(sourceNode.x ?? 0, sourceNode.y ?? 0);
+      ctx.lineTo(targetNode.x ?? 0, targetNode.y ?? 0);
+      ctx.lineWidth = linkId === selectedEdgeIdRef.current ? 14 : hoveredLinkIdRef.current === linkId ? 12 : 10;
+      ctx.strokeStyle = color;
+      ctx.stroke();
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    []
   );
 
   if (graphData.nodes.length === 0) {
@@ -348,51 +724,108 @@ export default function GraphCanvas({
           </h2>
         </div>
         <div className="rounded-full border border-cyan-accent/20 bg-cyan-accent/10 px-3 py-1 text-xs text-cyan-accent">
-          {selectedEdge
-            ? "Connection selected"
-            : selectedNode
-            ? "Node selected"
-            : "Drag or inspect"}
+          {interactionLabel}
         </div>
       </div>
 
-      <div ref={viewportRef} className="relative min-h-0 flex-1 bg-background">
+      <div ref={viewportRef} className="relative min-h-0 flex-1 overflow-hidden bg-background">
+        <div className="graph-canvas-aurora pointer-events-none absolute inset-0" />
+        <div className="graph-canvas-grid pointer-events-none absolute inset-0 opacity-50" />
         <ForceGraph2D
+          ref={graphRef as never}
           width={dimensions.width}
           height={dimensions.height}
           graphData={forceData}
-          backgroundColor="#030712"
+          backgroundColor="rgba(0, 0, 0, 0)"
           nodeCanvasObject={nodeCanvasObject as never}
           nodePointerAreaPaint={((rawNode: NodeObject<GraphNode>, color: string, ctx: CanvasRenderingContext2D) => {
             const node = rawNode as ForceNode;
             ctx.beginPath();
-            ctx.arc(node.x ?? 0, node.y ?? 0, node.paperLabel ? 18 : 14, 0, 2 * Math.PI);
+            ctx.arc(node.x ?? 0, node.y ?? 0, node.paperLabel ? 14 : 10, 0, 2 * Math.PI);
             ctx.fillStyle = color;
             ctx.fill();
           }) as never}
+          onNodeHover={handleNodeHover as never}
+          onLinkHover={handleLinkHover as never}
           linkColor={((rawLink: LinkObject<GraphNode, GraphEdge>) => {
             const link = rawLink as ForceLink;
-            return getLinkId(link) === selectedId ? "#22d3ee" : "#374151";
+            const linkId = getLinkId(link);
+            if (linkId === selectedId) return "#67e8f9";
+            if (linkId === effectiveHoveredLinkId) return "#94a3b8";
+            return "#4b6a8a";
           }) as never}
           linkWidth={((rawLink: LinkObject<GraphNode, GraphEdge>) => {
             const link = rawLink as ForceLink;
-            return getLinkId(link) === selectedId ? 2.5 : 1.15;
+            const linkId = getLinkId(link);
+            if (linkId === selectedId) return 3;
+            if (linkId === effectiveHoveredLinkId) return 2.2;
+            return 1.4;
           }) as never}
-          linkDirectionalParticles={2}
-          linkDirectionalParticleWidth={1.5}
-          linkDirectionalParticleColor={() => "#22d3ee"}
+          linkCurvature={((rawLink: LinkObject<GraphNode, GraphEdge>) => {
+            const link = rawLink as ForceLink;
+            return getLinkId(link) === selectedId ? 0.06 : effectiveHoveredLinkId === getLinkId(link) ? 0.025 : 0;
+          }) as never}
+          linkDirectionalParticles={((rawLink: LinkObject<GraphNode, GraphEdge>) => {
+            const link = rawLink as ForceLink;
+            const linkId = getLinkId(link);
+            if (linkId === selectedId) return 4;
+            if (linkId === effectiveHoveredLinkId) return 3;
+            return 1;
+          }) as never}
+          linkDirectionalParticleWidth={((rawLink: LinkObject<GraphNode, GraphEdge>) => {
+            const link = rawLink as ForceLink;
+            return getLinkId(link) === selectedId ? 2.4 : effectiveHoveredLinkId === getLinkId(link) ? 1.8 : 1.2;
+          }) as never}
+          linkDirectionalParticleColor={((rawLink: LinkObject<GraphNode, GraphEdge>) => {
+            const link = rawLink as ForceLink;
+            return getLinkId(link) === selectedId ? "#cffafe" : "#22d3ee";
+          }) as never}
+          linkDirectionalParticleSpeed={0.0035}
+          linkPointerAreaPaint={linkPointerAreaPaint as never}
           onLinkClick={handleLinkClick as never}
           onNodeClick={handleNodeClick as never}
+          onNodeDrag={handleNodeDrag as never}
           onNodeDragEnd={handleNodeDragEnd as never}
+          onBackgroundClick={() => {
+            setHoveredNodeId(null);
+            setHoveredLinkId(null);
+          }}
+          onEngineStop={handleEngineStop}
           enableNodeDrag={true}
-          cooldownTicks={100}
+          minZoom={0.45}
+          maxZoom={4}
+          linkHoverPrecision={10}
+          cooldownTicks={200}
           enableZoomInteraction={true}
           enablePanInteraction={true}
+          showPointerCursor={((obj: ForceNode | ForceLink | undefined) => Boolean(obj)) as never}
         />
 
-        <div className="pointer-events-none absolute bottom-4 left-4 rounded-full border border-amber-accent/20 bg-gray-950/90 px-4 py-2 text-xs text-gray-300 shadow-[0_12px_24px_rgba(0,0,0,0.28)]">
-          Drag nodes to reposition them. Click any node or connection to inspect it.
+        <div className="pointer-events-none absolute left-4 top-4 flex items-center gap-2 rounded-full border border-white/10 bg-gray-950/70 px-3 py-1.5 text-gray-300 shadow-[0_12px_24px_rgba(0,0,0,0.28)] backdrop-blur">
+          <span className="text-[10px] font-semibold uppercase tracking-[0.2em] text-cyan-accent/85">
+            Graph
+          </span>
+          <span className="text-[11px]">{graphData.nodes.length}n</span>
+          <span className="text-[11px]">{graphData.edges.length}e</span>
         </div>
+
+        <div className="pointer-events-auto absolute right-4 top-4 flex items-center gap-2">
+          <button
+            type="button"
+            onClick={handleZoomToFit}
+            className="rounded-full border border-white/10 bg-gray-950/80 px-3 py-2 text-[11px] font-medium text-gray-200 transition-all hover:border-cyan-accent/40 hover:text-cyan-accent"
+          >
+            Orbit Fit
+          </button>
+          <button
+            type="button"
+            onClick={handleRemixLayout}
+            className="rounded-full border border-cyan-accent/20 bg-cyan-accent/10 px-3 py-2 text-[11px] font-medium text-cyan-accent transition-all hover:border-cyan-accent/40 hover:bg-cyan-accent/15"
+          >
+            Remix Layout
+          </button>
+        </div>
+
 
         {legendItems.length > 0 ? (
           <div className="pointer-events-auto absolute bottom-4 right-4 max-w-[240px]">

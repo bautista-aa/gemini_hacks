@@ -7,10 +7,13 @@ import {
   NODE_TYPES,
 } from "@/lib/types";
 
-const GEMINI_MODEL = "gemini-2.5-flash";
+const DEFAULT_GEMINI_MODEL = "gemini-3-flash-preview";
+const GEMINI_MODEL = process.env.GEMINI_MODEL?.trim() || DEFAULT_GEMINI_MODEL;
 const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
 const MAX_FILE_COUNT = 5;
 const MAX_TOTAL_BYTES = 18 * 1024 * 1024;
+
+type ThinkingLevel = "minimal" | "low" | "high";
 
 const GRAPH_RESPONSE_SCHEMA = {
   type: "object",
@@ -25,6 +28,10 @@ const GRAPH_RESPONSE_SCHEMA = {
           summary: { type: "string" },
           evidence: { type: "string" },
           paperLabel: { type: "string" },
+          displayLabel: { type: "string" },
+          paperTitle: { type: "string" },
+          themeLabel: { type: "string" },
+          themeDescription: { type: "string" },
         },
         required: ["id", "type"],
       },
@@ -47,76 +54,6 @@ const GRAPH_RESPONSE_SCHEMA = {
   required: ["nodes", "edges"],
 } as const;
 
-const PAPER_ANALYSIS_RESPONSE_SCHEMA = {
-  type: "object",
-  properties: {
-    papers: {
-      type: "array",
-      items: {
-        type: "object",
-        properties: {
-          paperLabel: { type: "string" },
-          title: { type: "string" },
-          displayLabel: { type: "string" },
-          themeLabel: { type: "string" },
-          themeDescription: { type: "string" },
-          summary: { type: "string" },
-          evidence: { type: "string" },
-        },
-        required: [
-          "paperLabel",
-          "title",
-          "displayLabel",
-          "themeLabel",
-          "themeDescription",
-          "summary",
-          "evidence",
-        ],
-      },
-    },
-  },
-  required: ["papers"],
-} as const;
-
-const PAPER_TITLE_RESPONSE_SCHEMA = {
-  type: "object",
-  properties: {
-    papers: {
-      type: "array",
-      items: {
-        type: "object",
-        properties: {
-          paperLabel: { type: "string" },
-          title: { type: "string" },
-          titleEvidence: { type: "string" },
-        },
-        required: ["paperLabel", "title", "titleEvidence"],
-      },
-    },
-  },
-  required: ["papers"],
-} as const;
-
-const PAPER_CONNECTION_RESPONSE_SCHEMA = {
-  type: "object",
-  properties: {
-    edges: {
-      type: "array",
-      items: {
-        type: "object",
-        properties: {
-          source: { type: "string" },
-          target: { type: "string" },
-          relation: { type: "string" },
-          explanation: { type: "string" },
-          evidence: { type: "string" },
-        },
-        required: ["source", "target", "relation", "explanation", "evidence"],
-      },
-    },
-  },
-  required: ["edges"],
-} as const;
 
 const EXTRACT_OUTPUT_CONTRACT = `
 {
@@ -145,88 +82,44 @@ const EXTRACT_OUTPUT_CONTRACT = `
 }
 `.trim();
 
-const PAPER_TITLE_SYSTEM_PROMPT = `
-You read uploaded PDF research papers and extract only the canonical title for each file.
-Return only valid JSON matching the provided schema.
-Rules:
-- Read each PDF directly from its contents, not from its filename.
-- Return exactly one paper object per uploaded PDF in upload order.
-- "paperLabel" must be "Paper 1", "Paper 2", etc. matching upload order.
-- "title" must be the real paper title from the document itself, usually the prominent first-page title/header.
-- "titleEvidence" must be a short direct excerpt of the title line or immediate title area from the PDF.
-- Never use placeholders, filenames, author-year citations, OCR fragments, or generic labels as the title.
-- Forbidden examples for title: "TITLE", "Paper 1", "Levine et al., 2018", "aging i6 206135".
-- If OCR is imperfect, reconstruct the best plausible full title from the first page rather than returning noisy fragments.
-`.trim();
-
-const PAPER_ANALYSIS_SYSTEM_PROMPT = `
-You read uploaded PDF research papers and extract one authoritative paper record per file.
-Return only valid JSON matching the provided schema.
-Rules:
-- Read each PDF directly from its contents, not from its filename.
-- Determine the paper title from the document itself, usually the prominent first-page title/header.
-- Return exactly one paper object per uploaded PDF in upload order.
-- "paperLabel" must be "Paper 1", "Paper 2", etc. matching upload order.
-- If canonical paper titles are provided in the prompt, the "title" value must exactly match the canonical title for that paperLabel.
-- "title" must be the real paper title text from the document.
-- "displayLabel" must be a short 2-4 word canvas label for the paper, derived from the paper's topic or title.
-- "displayLabel" must stay readable on a graph and must not be a filename, citation fragment, or OCR garbage.
-- "themeLabel" must be a short shared topic group for legend coloring such as "DNA aging", "edge AI", or "glucose sensing".
-- Papers that are closely related should reuse the same or nearly identical "themeLabel" so they can share a color group.
-- "themeDescription" must be one concise sentence explaining what that color group represents.
-- Never use placeholders, filenames, author-year citations, OCR fragments, or generic labels as the title.
-- Forbidden examples for title: "TITLE", "Paper 1", "Levine et al., 2018", "aging i6 206135".
-- If OCR is imperfect, reconstruct the best plausible full title from the first page rather than returning noisy fragments.
-- "summary" must be a concise grounded explanation of the paper's main contribution.
-- "evidence" must be a direct quote or grounded excerpt from the paper.
-`.trim();
 
 const EXTRACT_SYSTEM_PROMPT = `
 You extract a clean knowledge graph from uploaded research papers.
 The frontend expects this exact GraphData shape:
 ${EXTRACT_OUTPUT_CONTRACT}
 Return only a single valid JSON object. No markdown, no code fences, no commentary.
-Rules:
-- Nodes must be unique entities with short display names.
-- Allowed node types: technology, method, author, application, concept.
-- Analyze every uploaded PDF in full before returning JSON.
-- First, extract the title of each uploaded paper from the PDF content itself (usually the first-page title/header).
-- Include exactly one dedicated paper-title node per uploaded paper.
-- For each paper-title node, set node id equal to the extracted paper title text.
-- Never use filename text, author-year citations, shorthand labels, placeholders, or generic text as paper node ids.
-- Forbidden paper node ids include examples like: "TITLE", "Paper 1", "aging i6 206135", "Levine et al., 2018".
-- For each paper-title node, include:
-  - displayLabel: a readable 2-4 word label for the graph canvas
-  - paperTitle: the same full canonical paper title used in node id
-  - themeLabel: short shared topic group for paper color legend
-  - themeDescription: one-sentence legend explanation for that paper color
-  - summary: 1-3 sentences with the paper's key contribution
-  - evidence: a direct quote or grounded excerpt from the paper
-  - paperLabel: "Paper 1", "Paper 2", etc. matching upload order when possible
-- When multiple papers are uploaded, include edges between the paper-title nodes whenever the papers are clearly related by method, domain, dataset, objective, or findings.
-- Paper-to-paper edges must explain why the papers are correlated.
-- Edges must connect existing node ids.
-- relation must be a short verb phrase such as "improves", "uses", "proposes", or "studies".
-- explanation must be concise and grounded in the papers.
+
+## Node types
+- **Paper nodes**: one per uploaded PDF, representing the document itself.
+- **Topic nodes**: key concepts, methods, technologies, applications, or authors extracted FROM the papers. These are the most important part of the graph — they show what each paper is about and create meaningful connections between papers.
+
+## Rules for paper nodes
+- Include exactly one paper-title node per uploaded PDF.
+- Set the node id to the extracted paper title from the PDF content (first-page title).
+- Never use filenames, author-year citations, or placeholders as paper node ids.
+- Forbidden examples: "TITLE", "Paper 1", "aging i6 206135", "Levine et al., 2018".
+- Include: displayLabel (2-4 words), paperTitle, themeLabel, themeDescription, summary, evidence, paperLabel ("Paper 1", etc.).
+
+## Rules for topic nodes (critical for graph quality)
+- For each paper, extract 4-8 topic nodes representing its key subjects: methods used, technologies mentioned, core concepts, important applications, or notable authors.
+- Topic nodes should be specific and meaningful (e.g. "Epigenetic Clocks", "GWAS", "Telomere Length") not vague (e.g. "Analysis", "Results", "Data").
+- If two papers discuss the same topic, they MUST share the same topic node (same id). This is how cross-paper connections form naturally. Actively look for shared topics across papers.
+- Topic nodes do NOT have paperLabel set — only paper nodes do.
+- Allowed types: technology, method, author, application, concept.
+
+## Rules for edges (MAXIMIZE CONNECTIONS)
+- Connect each paper node to ALL of its topic nodes (e.g. paper → "uses" → method, paper → "studies" → concept). Every paper MUST have edges to every one of its topic nodes.
+- Also connect paper nodes directly to each other when they share methods, goals, domains, or findings (e.g. paper → "extends" → paper, paper → "shares methods with" → paper).
+- Connect topic nodes to each other when they are related (e.g. method → "enables" → application, concept → "builds on" → concept, technology → "implements" → method). These cross-topic edges create a rich, interconnected graph.
+- The graph should feel dense and interconnected, not sparse. Aim for at least 2-3x more edges than nodes.
+- relation must be a short verb phrase: "uses", "proposes", "studies", "applies", "extends", "introduces", "shares methods with", "supports", "contrasts with", "enables", "builds on", "implements", "complements".
+- explanation must be concise and grounded in the paper content.
 - evidence must be a direct quote when available, otherwise a close grounded excerpt.
+- Edges must only connect existing node ids.
 - Avoid duplicate nodes, duplicate edges, vague labels, and unsupported claims.
 - Always include both top-level keys: "nodes" and "edges" (use [] when empty).
 `.trim();
 
-const PAPER_CONNECTION_SYSTEM_PROMPT = `
-You compare uploaded research papers and create edges between the paper-title nodes.
-Return only valid JSON matching the provided schema.
-Rules:
-- Use the exact paper titles provided to you for source and target.
-- Create edges only between paper-title nodes, not between paper labels.
-- Focus on why the papers are correlated: shared methods, goals, domains, datasets, findings, or complementary approaches.
-- relation must be a short phrase such as "shares methods with", "supports", "extends", "aligns with", or "contrasts with".
-- explanation must clearly state why the two papers are related.
-- evidence must reference grounded excerpts or summaries from the provided paper metadata.
-- Avoid duplicate edges and self-links.
-- If there is a meaningful overlap, create an edge.
-- If papers are genuinely unrelated, return an empty edges array.
-`.trim();
 
 const GRAPH_REPAIR_SYSTEM_PROMPT = `
 You repair malformed research-graph output into valid GraphData JSON for a frontend.
@@ -271,6 +164,7 @@ type GeminiResponse = {
 type PaperAnalysis = {
   paperLabel: string;
   title: string;
+  titleEvidence: string;
   displayLabel: string;
   themeLabel: string;
   themeDescription: string;
@@ -304,6 +198,35 @@ const DISPLAY_LABEL_STOP_WORDS = new Set([
   "using",
   "via",
   "with",
+]);
+
+const PAPER_CORRELATION_STOP_WORDS = new Set([
+  ...DISPLAY_LABEL_STOP_WORDS,
+  "analysis",
+  "approach",
+  "based",
+  "common",
+  "data",
+  "dataset",
+  "datasets",
+  "framework",
+  "focus",
+  "general",
+  "method",
+  "methods",
+  "model",
+  "models",
+  "paper",
+  "papers",
+  "research",
+  "result",
+  "results",
+  "share",
+  "shared",
+  "study",
+  "system",
+  "systems",
+  "topic",
 ]);
 
 const PAPER_THEME_PALETTE = [
@@ -422,6 +345,215 @@ function buildPaperAliasMap(paperAnalyses: PaperAnalysis[]): Map<string, string>
   }
 
   return aliasMap;
+}
+
+function buildUndirectedEdgeKey(left: string, right: string): string {
+  return [cleanText(left), cleanText(right)].sort((a, b) => a.localeCompare(b)).join("::");
+}
+
+function clipCorrelationEvidence(value: string, fallback: string): string {
+  const cleaned = cleanText(value) || cleanText(fallback);
+  if (!cleaned) return "";
+  if (cleaned.length <= 180) return cleaned;
+  return `${cleaned.slice(0, 177).trimEnd()}...`;
+}
+
+function buildExistingPaperPairSet(
+  paperAnalyses: PaperAnalysis[],
+  existingEdges: GraphEdge[] = []
+): Set<string> {
+  const validTitles = new Set(
+    paperAnalyses.map((paper) => cleanText(paper.title)).filter((title) => title.length > 0)
+  );
+  const connectedPairs = new Set<string>();
+
+  existingEdges.forEach((edge) => {
+    const source = cleanText(edge.source);
+    const target = cleanText(edge.target);
+    if (!source || !target || source === target) return;
+    if (!validTitles.has(source) || !validTitles.has(target)) return;
+    connectedPairs.add(buildUndirectedEdgeKey(source, target));
+  });
+
+  return connectedPairs;
+}
+
+function extractCorrelationKeywords(...values: string[]): string[] {
+  const seen = new Set<string>();
+
+  values.forEach((value) => {
+    value
+      .toLowerCase()
+      .replace(/[^\p{L}\p{N}\s-]+/gu, " ")
+      .replace(/-/g, " ")
+      .split(/\s+/)
+      .map((token) => token.trim())
+      .filter((token) => token.length >= 4)
+      .filter((token) => !/^\d+$/.test(token))
+      .filter((token) => !PAPER_CORRELATION_STOP_WORDS.has(token))
+      .forEach((token) => seen.add(token));
+  });
+
+  return Array.from(seen);
+}
+
+type PaperPairInsight = {
+  left: PaperAnalysis;
+  right: PaperAnalysis;
+  leftTitle: string;
+  rightTitle: string;
+  pairKey: string;
+  sameTheme: boolean;
+  sharedKeywords: string[];
+  overlapScore: number;
+  qualifies: boolean;
+};
+
+function buildPaperPairInsight(
+  left: PaperAnalysis,
+  right: PaperAnalysis,
+  minimumSharedKeywords: number
+): PaperPairInsight | null {
+  const leftTitle = cleanText(left.title);
+  const rightTitle = cleanText(right.title);
+  if (!leftTitle || !rightTitle || leftTitle === rightTitle) return null;
+
+  const leftTheme = cleanText(left.themeLabel);
+  const rightTheme = cleanText(right.themeLabel);
+  const normalizedLeftTheme = normalizeAlias(leftTheme);
+  const normalizedRightTheme = normalizeAlias(rightTheme);
+  const sameTheme =
+    normalizedLeftTheme.length > 0 &&
+    normalizedLeftTheme === normalizedRightTheme;
+
+  const leftKeywords = extractCorrelationKeywords(
+    left.title,
+    left.displayLabel,
+    left.themeLabel,
+    left.themeDescription,
+    left.summary
+  );
+  const rightKeywordSet = new Set(
+    extractCorrelationKeywords(
+      right.title,
+      right.displayLabel,
+      right.themeLabel,
+      right.themeDescription,
+      right.summary
+    )
+  );
+  const sharedKeywords = leftKeywords.filter((keyword) => rightKeywordSet.has(keyword));
+  const overlapScore = (sameTheme ? 3 : 0) + Math.min(sharedKeywords.length, 4);
+
+  return {
+    left,
+    right,
+    leftTitle,
+    rightTitle,
+    pairKey: buildUndirectedEdgeKey(leftTitle, rightTitle),
+    sameTheme,
+    sharedKeywords,
+    overlapScore,
+    qualifies: sameTheme || sharedKeywords.length >= minimumSharedKeywords,
+  };
+}
+
+type PaperConnectionCandidate = PaperPairInsight;
+
+export function buildPaperConnectionCandidates(
+  paperAnalyses: PaperAnalysis[],
+  existingEdges: GraphEdge[] = []
+): PaperConnectionCandidate[] {
+  if (paperAnalyses.length < 2) return [];
+
+  const minimumSharedKeywords = paperAnalyses.length <= 3 ? 1 : 2;
+  const connectedPairs = buildExistingPaperPairSet(paperAnalyses, existingEdges);
+  const candidates: PaperConnectionCandidate[] = [];
+
+  for (let leftIndex = 0; leftIndex < paperAnalyses.length; leftIndex += 1) {
+    const left = paperAnalyses[leftIndex];
+
+    for (let rightIndex = leftIndex + 1; rightIndex < paperAnalyses.length; rightIndex += 1) {
+      const right = paperAnalyses[rightIndex];
+      const insight = buildPaperPairInsight(left, right, minimumSharedKeywords);
+      if (!insight) continue;
+      if (connectedPairs.has(insight.pairKey)) continue;
+      if (!insight.qualifies) continue;
+      candidates.push(insight);
+    }
+  }
+
+  if (candidates.length === 0 && paperAnalyses.length === 2) {
+    const fallbackCandidate = buildPaperPairInsight(
+      paperAnalyses[0],
+      paperAnalyses[1],
+      minimumSharedKeywords
+    );
+    if (
+      fallbackCandidate &&
+      !connectedPairs.has(fallbackCandidate.pairKey)
+    ) {
+      candidates.push(fallbackCandidate);
+    }
+  }
+
+  return candidates.sort(
+    (left, right) =>
+      right.overlapScore - left.overlapScore ||
+      left.leftTitle.localeCompare(right.leftTitle) ||
+      left.rightTitle.localeCompare(right.rightTitle)
+  );
+}
+
+export function buildHeuristicPaperConnections(
+  paperAnalyses: PaperAnalysis[],
+  existingEdges: GraphEdge[] = []
+): GraphEdge[] {
+  if (paperAnalyses.length < 2) return [];
+
+  const connectedPairs = buildExistingPaperPairSet(paperAnalyses, existingEdges);
+  const heuristicEdges: GraphEdge[] = [];
+  const minimumSharedKeywords = paperAnalyses.length <= 3 ? 1 : 2;
+
+  for (let leftIndex = 0; leftIndex < paperAnalyses.length; leftIndex += 1) {
+    const left = paperAnalyses[leftIndex];
+
+    for (let rightIndex = leftIndex + 1; rightIndex < paperAnalyses.length; rightIndex += 1) {
+      const right = paperAnalyses[rightIndex];
+      const insight = buildPaperPairInsight(left, right, minimumSharedKeywords);
+      if (!insight) continue;
+      if (connectedPairs.has(insight.pairKey) || !insight.qualifies) continue;
+
+      const leftTheme = cleanText(left.themeLabel);
+      const relation = insight.sameTheme
+        ? "shares research focus with"
+        : insight.sharedKeywords.length >= 2
+        ? "overlaps with"
+        : "aligns with";
+      const leftLabel = cleanText(left.displayLabel) || insight.leftTitle;
+      const rightLabel = cleanText(right.displayLabel) || insight.rightTitle;
+      const sharedKeywordLabel = insight.sharedKeywords.slice(0, 4).join(", ");
+      const explanation = insight.sameTheme
+        ? `${leftLabel} and ${rightLabel} both center on ${leftTheme}, making the papers directly comparable.`
+        : `${leftLabel} and ${rightLabel} overlap around ${sharedKeywordLabel}, linking their research contributions.`;
+      const leftEvidence = clipCorrelationEvidence(left.evidence || left.summary, insight.leftTitle);
+      const rightEvidence = clipCorrelationEvidence(right.evidence || right.summary, insight.rightTitle);
+      const evidence = insight.sameTheme
+        ? `Shared theme: ${leftTheme}. ${insight.leftTitle}: ${leftEvidence} ${insight.rightTitle}: ${rightEvidence}`
+        : `Shared terms: ${sharedKeywordLabel}. ${insight.leftTitle}: ${leftEvidence} ${insight.rightTitle}: ${rightEvidence}`;
+
+      heuristicEdges.push({
+        source: insight.leftTitle,
+        target: insight.rightTitle,
+        relation,
+        explanation,
+        evidence,
+      });
+      connectedPairs.add(insight.pairKey);
+    }
+  }
+
+  return heuristicEdges;
 }
 
 function buildFallbackDisplayLabel(title: string): string {
@@ -544,177 +676,85 @@ function sanitizeNodeId(
   return cleaned;
 }
 
-function normalizePaperTitles(raw: unknown, files: File[]): PaperTitleAnchor[] {
-  const fileAliasSet = buildFileAliasSet(files);
-  const rawPapers = Array.isArray((raw as { papers?: unknown[] })?.papers)
-    ? ((raw as { papers: unknown[] }).papers ?? [])
-    : [];
-  const normalizedPapers: PaperTitleAnchor[] = [];
 
-  rawPapers.forEach((rawPaper, index) => {
-    const fallbackLabel = `Paper ${index + 1}`;
-    const paperLabel = cleanText((rawPaper as { paperLabel?: unknown })?.paperLabel) || fallbackLabel;
-    const title = sanitizeExtractedPaperTitle(
-      cleanText((rawPaper as { title?: unknown })?.title),
-      fileAliasSet
-    );
-    const titleEvidence = cleanText((rawPaper as { titleEvidence?: unknown })?.titleEvidence);
-
-    if (!title) return;
-
-    normalizedPapers.push({
-      paperLabel,
-      title,
-      titleEvidence,
-    });
-  });
-
-  return files.flatMap((_, index) => {
-    const label = `Paper ${index + 1}`;
-    const existing =
-      normalizedPapers.find((paper) => normalizeAlias(paper.paperLabel) === normalizeAlias(label)) ??
-      normalizedPapers[index];
-
-    if (!existing) return [];
-
-    return [
-      {
-        paperLabel: label,
-        title: existing.title,
-        titleEvidence: existing.titleEvidence,
-      },
-    ];
-  });
-}
-
-function normalizePaperAnalyses(
-  raw: unknown,
-  files: File[],
-  paperTitles: PaperTitleAnchor[]
+function buildPaperAnalysesFromGraph(
+  graph: GraphData,
+  fallbackAnalyses: PaperAnalysis[]
 ): PaperAnalysis[] {
-  const fileAliasSet = buildFileAliasSet(files);
-  const rawPapers = Array.isArray((raw as { papers?: unknown[] })?.papers)
-    ? ((raw as { papers: unknown[] }).papers ?? [])
-    : [];
-  const titleByLabel = new Map(
-    paperTitles.map((paper) => [normalizeAlias(paper.paperLabel), paper])
+  const graphNodesByPaperLabel = new Map(
+    graph.nodes
+      .filter((node) => cleanText(node.paperLabel))
+      .map((node) => [normalizeAlias(node.paperLabel || ""), node] as const)
   );
-  const normalizedPapers: PaperAnalysis[] = [];
 
-  rawPapers.forEach((rawPaper, index) => {
-    const fallbackLabel = `Paper ${index + 1}`;
-    const paperLabel = cleanText((rawPaper as { paperLabel?: unknown })?.paperLabel) || fallbackLabel;
-    const anchoredTitle = titleByLabel.get(normalizeAlias(paperLabel));
-    const title =
-      anchoredTitle?.title ||
-      sanitizeExtractedPaperTitle(
-        cleanText((rawPaper as { title?: unknown })?.title),
-        fileAliasSet
-      );
-    const displayLabel = sanitizeDisplayLabel(
-      cleanText((rawPaper as { displayLabel?: unknown })?.displayLabel),
-      title,
-      fileAliasSet
-    );
-    const themeLabel = sanitizeThemeLabel(
-      cleanText((rawPaper as { themeLabel?: unknown })?.themeLabel),
-      title
-    );
-    const themeDescription = sanitizeThemeDescription(
-      cleanText((rawPaper as { themeDescription?: unknown })?.themeDescription),
-      themeLabel
-    );
-    const summary = cleanText((rawPaper as { summary?: unknown })?.summary);
-    const evidence = cleanText((rawPaper as { evidence?: unknown })?.evidence);
+  if (fallbackAnalyses.length === 0) {
+    return graph.nodes.flatMap((node) => {
+      const paperLabel = cleanText(node.paperLabel);
+      const title = cleanText(node.paperTitle) || cleanText(node.id);
 
-    if (!title) {
-      return;
-    }
+      if (!paperLabel || !title) return [];
 
-    normalizedPapers.push({
-      paperLabel,
-      title,
-      displayLabel,
-      themeLabel,
-      themeDescription,
-      summary,
-      evidence: evidence || anchoredTitle?.titleEvidence || "",
-    });
-  });
+      const displayLabel = cleanText(node.displayLabel) || buildFallbackDisplayLabel(title);
+      const themeLabel = cleanText(node.themeLabel) || buildFallbackDisplayLabel(title);
 
-  return files.flatMap((_, index) => {
-    const label = `Paper ${index + 1}`;
-    const anchoredTitle = titleByLabel.get(normalizeAlias(label));
-    const existing =
-      normalizedPapers.find((paper) => normalizeAlias(paper.paperLabel) === normalizeAlias(label)) ??
-      normalizedPapers[index];
-    const title = anchoredTitle?.title || existing?.title || "";
-
-    if (!title) return [];
-
-    return [
-      {
-        paperLabel: label,
-        title,
-        displayLabel:
-          existing?.displayLabel || buildFallbackDisplayLabel(title),
-        themeLabel:
-          existing?.themeLabel || buildFallbackDisplayLabel(title),
-        themeDescription:
-          existing?.themeDescription ||
-          `${existing?.themeLabel || buildFallbackDisplayLabel(title)} papers share a common research focus.`,
-        summary: existing?.summary || "",
-        evidence: existing?.evidence || anchoredTitle?.titleEvidence || "",
-      },
-    ];
-  });
-}
-
-function normalizePaperConnections(
-  raw: unknown,
-  paperAnalyses: PaperAnalysis[]
-): GraphEdge[] {
-  const paperLabelTitleMap = buildPaperLabelTitleMap(paperAnalyses);
-  const paperAliasMap = buildPaperAliasMap(paperAnalyses);
-  const validTitles = new Set(
-    paperAnalyses.map((paper) => cleanText(paper.title)).filter((title) => title.length > 0)
-  );
-  const rawEdges = Array.isArray((raw as { edges?: unknown[] })?.edges)
-    ? ((raw as { edges: unknown[] }).edges ?? [])
-    : [];
-  const edgeMap = new Map<string, GraphEdge>();
-
-  for (const rawEdge of rawEdges) {
-    const rawSource = cleanText((rawEdge as { source?: unknown })?.source);
-    const rawTarget = cleanText((rawEdge as { target?: unknown })?.target);
-    const source =
-      paperAliasMap.get(normalizeAlias(rawSource)) ||
-      sanitizeNodeId(rawSource, new Map<string, string>(), paperLabelTitleMap);
-    const target =
-      paperAliasMap.get(normalizeAlias(rawTarget)) ||
-      sanitizeNodeId(rawTarget, new Map<string, string>(), paperLabelTitleMap);
-    const relation = cleanText((rawEdge as { relation?: unknown })?.relation);
-    const explanation = cleanText(
-      (rawEdge as { explanation?: unknown })?.explanation
-    );
-    const evidence = cleanText((rawEdge as { evidence?: unknown })?.evidence);
-
-    if (!source || !target || source === target) continue;
-    if (!validTitles.has(source) || !validTitles.has(target)) continue;
-    if (!relation || !explanation || !evidence) continue;
-
-    const edgeKey = `${source}::${target}::${relation.toLowerCase()}`;
-    edgeMap.set(edgeKey, {
-      source,
-      target,
-      relation,
-      explanation,
-      evidence,
+      return [
+        {
+          paperLabel,
+          title,
+          titleEvidence: clipCorrelationEvidence(
+            cleanText(node.evidence) || cleanText(node.summary),
+            title
+          ),
+          displayLabel,
+          themeLabel,
+          themeDescription:
+            cleanText(node.themeDescription) ||
+            `${themeLabel} papers share a common research focus.`,
+          summary: cleanText(node.summary),
+          evidence: cleanText(node.evidence),
+        },
+      ];
     });
   }
 
-  return Array.from(edgeMap.values());
+  return fallbackAnalyses.flatMap((fallbackAnalysis) => {
+    const graphNode = graphNodesByPaperLabel.get(normalizeAlias(fallbackAnalysis.paperLabel));
+    const title =
+      cleanText(graphNode?.paperTitle) ||
+      cleanText(graphNode?.id) ||
+      fallbackAnalysis.title;
+
+    if (!title) return [];
+
+    const displayLabel = cleanText(graphNode?.displayLabel) || fallbackAnalysis.displayLabel;
+    const themeLabel = cleanText(graphNode?.themeLabel) || fallbackAnalysis.themeLabel;
+
+    return [
+      {
+        paperLabel: fallbackAnalysis.paperLabel,
+        title,
+        titleEvidence:
+          fallbackAnalysis.titleEvidence ||
+          clipCorrelationEvidence(
+            cleanText(graphNode?.evidence) || cleanText(graphNode?.summary),
+            title
+          ),
+        displayLabel: displayLabel || buildFallbackDisplayLabel(title),
+        themeLabel: themeLabel || buildFallbackDisplayLabel(title),
+        themeDescription:
+          cleanText(graphNode?.themeDescription) ||
+          fallbackAnalysis.themeDescription ||
+          `${themeLabel || buildFallbackDisplayLabel(title)} papers share a common research focus.`,
+        summary: cleanText(graphNode?.summary) || fallbackAnalysis.summary,
+        evidence:
+          cleanText(graphNode?.evidence) ||
+          fallbackAnalysis.evidence ||
+          fallbackAnalysis.titleEvidence,
+      },
+    ];
+  });
 }
+
 
 function normalizeNodeType(value: unknown): GraphNodeType {
   return NODE_TYPES.includes(value as GraphNodeType)
@@ -793,12 +833,10 @@ function normalizeGraph(
     nodeMap.set(title, {
       id: title,
       type: "concept",
-      displayLabel: cleanText(paper.displayLabel) || buildFallbackDisplayLabel(title),
+      displayLabel: cleanText(paper.displayLabel) || undefined,
       paperTitle: title,
-      themeLabel: cleanText(paper.themeLabel) || buildFallbackDisplayLabel(title),
-      themeDescription:
-        cleanText(paper.themeDescription) ||
-        `${cleanText(paper.themeLabel) || buildFallbackDisplayLabel(title)} papers share a common research focus.`,
+      themeLabel: cleanText(paper.themeLabel) || undefined,
+      themeDescription: cleanText(paper.themeDescription) || undefined,
       summary: cleanText(paper.summary) || undefined,
       evidence: cleanText(paper.evidence) || undefined,
       paperLabel: paper.paperLabel,
@@ -813,6 +851,30 @@ function normalizeGraph(
   const rawNodes = Array.isArray((rawGraph as { nodes?: unknown[] })?.nodes)
     ? ((rawGraph as { nodes: unknown[] }).nodes ?? [])
     : [];
+
+  // when no pre-extracted analyses exist, build label→title map from raw nodes
+  if (paperAnalyses.length === 0) {
+    for (const rawNode of rawNodes) {
+      const label = cleanText((rawNode as { paperLabel?: unknown })?.paperLabel);
+      const rawId = cleanText((rawNode as { id?: unknown })?.id);
+      const rawPaperTitle = cleanText((rawNode as { paperTitle?: unknown })?.paperTitle);
+      const rawDisplayLabel = cleanText((rawNode as { displayLabel?: unknown })?.displayLabel);
+      if (!label) continue;
+      const title = rawPaperTitle || rawId;
+      if (!title) continue;
+      const normalizedLabel = normalizeAlias(normalizePaperLabel(label) ?? label);
+      if (!paperLabelTitleMap.has(normalizedLabel)) {
+        paperLabelTitleMap.set(normalizedLabel, title);
+      }
+      // also register in alias map
+      for (const alias of [label, title, rawDisplayLabel].filter(Boolean)) {
+        const norm = normalizeAlias(alias);
+        if (norm && !paperAliasMap.has(norm)) {
+          paperAliasMap.set(norm, title);
+        }
+      }
+    }
+  }
 
   for (const rawNode of rawNodes) {
     const rawId = cleanText((rawNode as { id?: unknown })?.id);
@@ -937,7 +999,14 @@ function normalizeGraph(
     );
     const evidence = cleanText((rawEdge as { evidence?: unknown })?.evidence);
 
-    if (!relation || !explanation || !evidence) continue;
+    if (!relation) {
+      console.warn(`[normalizeGraph] Dropped edge (no relation): ${cleanText((rawEdge as { source?: unknown })?.source)} -> ${cleanText((rawEdge as { target?: unknown })?.target)}`);
+      continue;
+    }
+
+    // fill in missing explanation/evidence with defaults so we don't drop valid edges
+    const resolvedExplanation = explanation || `${source} ${relation} ${target}.`;
+    const resolvedEvidence = evidence || "Extracted from paper content.";
 
     const edgeKey = `${source}::${target}::${relation.toLowerCase()}`;
     if (edgeMap.has(edgeKey)) continue;
@@ -946,9 +1015,20 @@ function normalizeGraph(
       source,
       target,
       relation,
-      explanation,
-      evidence,
+      explanation: resolvedExplanation,
+      evidence: resolvedEvidence,
     });
+  }
+
+  // log edges that Gemini returned but we couldn't resolve
+  for (const rawEdge of rawEdges) {
+    const rawSource = cleanText((rawEdge as { source?: unknown })?.source);
+    const rawTarget = cleanText((rawEdge as { target?: unknown })?.target);
+    const resolvedSource = resolveNodeId(rawSource);
+    const resolvedTarget = resolveNodeId(rawTarget);
+    if (!resolvedSource || !resolvedTarget) {
+      console.warn(`[normalizeGraph] Unresolved edge: "${rawSource}" (${resolvedSource ? "ok" : "FAIL"}) -> "${rawTarget}" (${resolvedTarget ? "ok" : "FAIL"})`);
+    }
   }
 
   const graph: GraphData = {
@@ -1000,35 +1080,83 @@ function normalizeGraph(
 }
 
 function buildThemeColorMap(graph: GraphData): Map<string, string> {
-  const themeEntries = graph.nodes
-    .filter((node) => node.paperLabel && cleanText(node.themeLabel))
-    .map((node) => normalizeAlias(node.themeLabel || ""))
-    .filter((theme, index, array) => theme.length > 0 && array.indexOf(theme) === index);
   const themeColorMap = new Map<string, string>();
+  let colorIndex = 0;
 
-  themeEntries.forEach((theme, index) => {
-    themeColorMap.set(theme, PAPER_THEME_PALETTE[index % PAPER_THEME_PALETTE.length]);
-  });
+  // first pass: assign colors by themeLabel for papers that have one
+  for (const node of graph.nodes) {
+    if (!node.paperLabel) continue;
+    const theme = normalizeAlias(node.themeLabel || "");
+    if (theme && !themeColorMap.has(theme)) {
+      themeColorMap.set(theme, PAPER_THEME_PALETTE[colorIndex % PAPER_THEME_PALETTE.length]);
+      colorIndex++;
+    }
+  }
+
+  // second pass: papers without themeLabel get a color keyed by paperLabel
+  for (const node of graph.nodes) {
+    if (!node.paperLabel) continue;
+    const theme = normalizeAlias(node.themeLabel || "");
+    if (theme && themeColorMap.has(theme)) continue;
+    // use paperLabel as fallback key
+    const fallbackKey = `__paper__${normalizeAlias(node.paperLabel)}`;
+    if (!themeColorMap.has(fallbackKey)) {
+      themeColorMap.set(fallbackKey, PAPER_THEME_PALETTE[colorIndex % PAPER_THEME_PALETTE.length]);
+      colorIndex++;
+    }
+  }
 
   return themeColorMap;
 }
 
+function resolvePaperColor(node: GraphNode, themeColorMap: Map<string, string>): string {
+  const themeKey = normalizeAlias(node.themeLabel || "");
+  if (themeKey && themeColorMap.has(themeKey)) return themeColorMap.get(themeKey)!;
+  const fallbackKey = `__paper__${normalizeAlias(node.paperLabel || "")}`;
+  if (themeColorMap.has(fallbackKey)) return themeColorMap.get(fallbackKey)!;
+  return PAPER_THEME_PALETTE[0];
+}
+
 function applyPaperThemeColors(graph: GraphData): GraphData {
   const themeColorMap = buildThemeColorMap(graph);
-  if (themeColorMap.size === 0) return graph;
+
+  // build a map: paper node id -> assigned color
+  const paperNodeColors = new Map<string, string>();
+  for (const node of graph.nodes) {
+    if (!node.paperLabel) continue;
+    paperNodeColors.set(node.id, resolvePaperColor(node, themeColorMap));
+  }
+
+  if (paperNodeColors.size === 0) return graph;
+
+  // for each edge from a paper node to a topic node, record the color
+  const topicColorMap = new Map<string, string>();
+  for (const edge of graph.edges) {
+    const sourceColor = paperNodeColors.get(edge.source);
+    const targetColor = paperNodeColors.get(edge.target);
+    // paper -> topic
+    if (sourceColor && !paperNodeColors.has(edge.target)) {
+      if (!topicColorMap.has(edge.target)) topicColorMap.set(edge.target, sourceColor);
+    }
+    // topic -> paper (reverse direction edges)
+    if (targetColor && !paperNodeColors.has(edge.source)) {
+      if (!topicColorMap.has(edge.source)) topicColorMap.set(edge.source, targetColor);
+    }
+  }
 
   return {
     ...graph,
     nodes: graph.nodes.map((node) => {
-      if (!node.paperLabel || !node.themeLabel) return node;
-
-      return {
-        ...node,
-        colorHex:
-          themeColorMap.get(normalizeAlias(node.themeLabel)) ||
-          node.colorHex ||
-          PAPER_THEME_PALETTE[0],
-      };
+      // paper nodes always get their theme color
+      if (node.paperLabel) {
+        return { ...node, colorHex: paperNodeColors.get(node.id) || PAPER_THEME_PALETTE[0] };
+      }
+      // topic nodes inherit color from their parent paper
+      const inherited = topicColorMap.get(node.id);
+      if (inherited) {
+        return { ...node, colorHex: inherited };
+      }
+      return node;
     }),
   };
 }
@@ -1167,147 +1295,19 @@ async function buildFileParts(files: File[]): Promise<GeminiPart[]> {
   return fileParts.flat();
 }
 
-async function extractPaperTitles(files: File[]): Promise<PaperTitleAnchor[]> {
-  const parts: GeminiPart[] = [
-    {
-      text: `
-Read every attached PDF and extract the canonical title for each paper.
-Determine the title from the document contents, especially the first page and title header.
-Return records in upload order.
-`.trim(),
-    },
-    ...(await buildFileParts(files)),
-  ];
 
-  const response = await callGemini({
-    systemInstruction: {
-      parts: [{ text: PAPER_TITLE_SYSTEM_PROMPT }],
+function withThinkingConfig<T extends Record<string, unknown>>(
+  config: T,
+  thinkingLevel: ThinkingLevel
+): T & { thinkingConfig: { thinkingLevel: ThinkingLevel } } {
+  return {
+    ...config,
+    thinkingConfig: {
+      thinkingLevel,
     },
-    contents: [
-      {
-        role: "user",
-        parts,
-      },
-    ],
-    generationConfig: {
-      temperature: 0,
-      maxOutputTokens: 4096,
-      responseMimeType: "application/json",
-      responseSchema: PAPER_TITLE_RESPONSE_SCHEMA,
-    },
-  });
-
-  const rawText = extractText(response);
-  const rawPaperTitles = parseGraphJson(rawText);
-  return normalizePaperTitles(rawPaperTitles, files);
+  };
 }
 
-async function extractPaperAnalyses(
-  files: File[],
-  paperTitles: PaperTitleAnchor[]
-): Promise<PaperAnalysis[]> {
-  const titleMemory =
-    paperTitles.length > 0
-      ? paperTitles
-          .map(
-            (paper) => `
-${paper.paperLabel}
-Canonical title: ${paper.title}
-Title evidence: ${paper.titleEvidence || "No title evidence extracted."}
-`.trim()
-          )
-          .join("\n\n")
-      : "No canonical title memory is available. Read the PDFs and infer the titles directly.";
-
-  const parts: GeminiPart[] = [
-    {
-      text: `
-Read every attached PDF and extract one authoritative paper record per file.
-Use the canonical paper-title memory below to keep titles stable across the pipeline.
-For each paper, return the same paperLabel and exact canonical title when available.
-
-Canonical paper-title memory:
-${titleMemory}
-`.trim(),
-    },
-    ...(await buildFileParts(files)),
-  ];
-
-  const response = await callGemini({
-    systemInstruction: {
-      parts: [{ text: PAPER_ANALYSIS_SYSTEM_PROMPT }],
-    },
-    contents: [
-      {
-        role: "user",
-        parts,
-      },
-    ],
-    generationConfig: {
-      temperature: 0.1,
-      maxOutputTokens: 4096,
-      responseMimeType: "application/json",
-      responseSchema: PAPER_ANALYSIS_RESPONSE_SCHEMA,
-    },
-  });
-
-  const rawText = extractText(response);
-  const rawPaperAnalysis = parseGraphJson(rawText);
-  return normalizePaperAnalyses(rawPaperAnalysis, files, paperTitles);
-}
-
-async function extractPaperConnections(
-  paperAnalyses: PaperAnalysis[]
-): Promise<GraphEdge[]> {
-  if (paperAnalyses.length < 2) return [];
-
-  const parts: GeminiPart[] = [
-    {
-      text: `
-Compare every pair of papers below and create explicit edges between paper-title nodes when the papers are meaningfully related.
-Use the exact paper titles provided in the metadata as the edge source and target.
-Focus on why the papers are correlated: shared methods, domains, goals, datasets, findings, or complementary approaches.
-`.trim(),
-    },
-    {
-      text: paperAnalyses
-        .map(
-          (paper) => `
-${paper.paperLabel}
-Title: ${paper.title}
-Display label: ${paper.displayLabel}
-Theme label: ${paper.themeLabel}
-Theme description: ${paper.themeDescription}
-Summary: ${paper.summary || "No summary extracted."}
-Evidence: ${paper.evidence || "No evidence extracted."}
-`.trim()
-        )
-        .join("\n\n"),
-    },
-  ];
-
-  const response = await callGemini({
-    systemInstruction: {
-      parts: [{ text: PAPER_CONNECTION_SYSTEM_PROMPT }],
-    },
-    contents: [
-      {
-        role: "user",
-        parts,
-      },
-    ],
-    generationConfig: {
-      temperature: 0.2,
-      maxOutputTokens: 4096,
-      responseMimeType: "application/json",
-      responseSchema: PAPER_CONNECTION_RESPONSE_SCHEMA,
-    },
-  });
-
-  const rawText = extractText(response);
-  const rawConnections = parseGraphJson(rawText);
-  return normalizePaperConnections(rawConnections, paperAnalyses);
-}
 
 async function repairGraphJson(
   rawText: string,
@@ -1341,12 +1341,12 @@ ${rawText}
         ],
       },
     ],
-    generationConfig: {
+    generationConfig: withThinkingConfig({
       temperature: 0,
       maxOutputTokens: 8192,
       responseMimeType: "application/json",
       responseSchema: GRAPH_RESPONSE_SCHEMA,
-    },
+    }, "minimal"),
   });
 
   return parseGraphJson(extractText(response));
@@ -1354,55 +1354,25 @@ ${rawText}
 
 export async function extractGraphFromPdfs(files: File[]): Promise<GraphData> {
   validatePdfFiles(files);
-  let paperTitles: PaperTitleAnchor[] = [];
-  let paperAnalyses: PaperAnalysis[] = [];
-
-  try {
-    paperTitles = await extractPaperTitles(files);
-    paperAnalyses = paperTitles.map((paper) => ({
-      paperLabel: paper.paperLabel,
-      title: paper.title,
-      displayLabel: buildFallbackDisplayLabel(paper.title),
-      themeLabel: buildFallbackDisplayLabel(paper.title),
-      themeDescription: `${buildFallbackDisplayLabel(paper.title)} papers share a common research focus.`,
-      summary: "",
-      evidence: paper.titleEvidence,
-    }));
-  } catch (error) {
-    console.warn("Paper title extraction failed; continuing with broader analysis.", error);
-  }
-
-  try {
-    const extractedAnalyses = await extractPaperAnalyses(files, paperTitles);
-    if (extractedAnalyses.length > 0) {
-      paperAnalyses = extractedAnalyses;
-    }
-  } catch (error) {
-    console.warn("Paper metadata extraction failed; continuing with graph extraction.", error);
-  }
-
   const fileParts = await buildFileParts(files);
-  const titleAnchors =
-    paperAnalyses.length > 0
-      ? paperAnalyses
-          .map((paper) => `${paper.paperLabel}: ${paper.title}`)
-          .join("\n")
-      : "No extracted paper titles available. Read the PDFs and determine the titles directly.";
 
+  // single Gemini call — titles, topics, and all edges in one shot
   const parts: GeminiPart[] = [
     {
       text: `
-Analyze the uploaded research papers and build a single merged knowledge graph.
-Focus on the important entities, methods, technologies, authors, concepts, and applications that appear across the documents.
-Prefer quality over quantity.
-Use exact node ids consistently in every edge source/target field.
-Read each PDF carefully and extract the real paper title from inside the document for the paper node id.
-If a title is not obvious, use the best full title candidate from the first page, not a placeholder token.
-Do not use filename strings, citation shorthand, OCR noise, or placeholder text as paper node ids.
-Use paperLabel to remember which uploaded paper a node belongs to, but always use the paper title as the node id.
-Use these extracted paper titles exactly for the dedicated paper nodes:
-${titleAnchors}
-When you create a paper node, include displayLabel, paperTitle, themeLabel, themeDescription, summary, evidence, and paperLabel fields.
+Analyze the uploaded research papers and build a RICHLY CONNECTED knowledge graph with two layers:
+1. **Paper nodes** — one per uploaded PDF. Read the real paper title from the first page of each PDF and use it as the node id. Never use filenames or placeholders.
+2. **Topic nodes** — key concepts, methods, technologies, applications, and authors extracted from each paper (4-8 per paper).
+
+CRITICAL: The graph must be DENSE with connections. Follow these rules:
+- For each paper, extract 4-8 specific topic nodes and connect the paper to EVERY one of them.
+- If two papers discuss the same topic (e.g. both use "GWAS" or both study "Telomere Length"), use the SAME topic node id so the papers are connected through it. Actively look for shared topics.
+- Create direct paper-to-paper edges when papers share methods, goals, domains, or findings.
+- Connect topic nodes to each other when related (e.g. a method enables an application, a concept builds on another concept). These inter-topic edges are what make the graph rich and useful.
+- Aim for at least 2-3x more edges than nodes. A graph with 10 nodes should have 20-30 edges.
+- Topic nodes must be specific and grounded in the paper content, not generic terms like "Analysis" or "Results".
+- Each paper node must include: displayLabel, paperTitle, themeLabel, themeDescription, summary, evidence, and paperLabel ("Paper 1", "Paper 2", etc.).
+- Topic nodes must NOT have paperLabel set.
 `.trim(),
     },
     ...fileParts,
@@ -1418,12 +1388,12 @@ When you create a paper node, include displayLabel, paperTitle, themeLabel, them
         parts,
       },
     ],
-    generationConfig: {
+    generationConfig: withThinkingConfig({
       temperature: 0.2,
-      maxOutputTokens: 8192,
+      maxOutputTokens: 16384,
       responseMimeType: "application/json",
       responseSchema: GRAPH_RESPONSE_SCHEMA,
-    },
+    }, "minimal"),
   });
 
   const rawText = extractText(response);
@@ -1433,24 +1403,20 @@ When you create a paper node, include displayLabel, paperTitle, themeLabel, them
     rawGraph = parseGraphJson(rawText);
   } catch (error) {
     if (!(error instanceof SyntaxError)) throw error;
-    rawGraph = await repairGraphJson(rawText, paperAnalyses);
+    rawGraph = await repairGraphJson(rawText, []);
   }
 
-  let graph = normalizeGraph(rawGraph, files, paperAnalyses);
+  const graph = normalizeGraph(rawGraph, files, []);
 
-  if (paperAnalyses.length > 1) {
-    try {
-      const paperConnections = await extractPaperConnections(paperAnalyses);
-      graph = mergeGraphEdges(graph, paperConnections);
-    } catch (error) {
-      console.warn(
-        "Paper connection extraction failed; returning graph without dedicated inter-paper edges.",
-        error
-      );
-    }
+  // add heuristic paper-to-paper edges for any pairs Gemini missed (no extra API call)
+  const paperAnalyses = buildPaperAnalysesFromGraph(graph, []);
+  let enrichedGraph = graph;
+  if (paperAnalyses.length >= 2) {
+    const heuristicEdges = buildHeuristicPaperConnections(paperAnalyses, graph.edges);
+    enrichedGraph = mergeGraphEdges(graph, heuristicEdges);
   }
 
-  return applyPaperThemeColors(graph);
+  return applyPaperThemeColors(enrichedGraph);
 }
 
 export async function askGeminiAboutEdge(
@@ -1495,10 +1461,10 @@ Edge context:
         ],
       },
     ],
-    generationConfig: {
+    generationConfig: withThinkingConfig({
       temperature: 0.3,
       maxOutputTokens: 512,
-    },
+    }, "minimal"),
   });
 
   return {

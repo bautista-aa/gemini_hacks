@@ -1,6 +1,8 @@
-﻿import { NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import { GraphData } from "@/lib/types";
 import { extractGraphFromPdfs, RouteError } from "@/lib/server/gemini";
+import { persistExtraction } from "@/lib/server/backend-client";
+import { rejectIfRouteExposureRisk } from "@/lib/server/request-guard";
 
 export const runtime = "nodejs";
 
@@ -55,12 +57,25 @@ export async function POST(request: Request) {
   let files: File[] = [];
 
   try {
+    const rejection = rejectIfRouteExposureRisk(request);
+    if (rejection) return rejection;
+
     const formData = await request.formData();
     files = formData
       .getAll("files")
       .filter((value): value is File => value instanceof File);
 
     const graph = await extractGraphFromPdfs(files);
+
+    console.log(
+      `[extract] Graph result: ${graph.nodes.length} nodes, ${graph.edges.length} edges`
+    );
+
+    // fire-and-forget: persist to backend (Supabase) without blocking the response
+    persistExtraction(files, graph).catch((err) =>
+      console.warn("Background persistence failed:", err)
+    );
+
     return NextResponse.json(graph);
   } catch (error) {
     if (isRouteError(error)) {
@@ -68,7 +83,13 @@ export async function POST(request: Request) {
     }
 
     if (error instanceof SyntaxError) {
-      return NextResponse.json(buildFallbackGraph(files));
+      const fallback = buildFallbackGraph(files);
+
+      persistExtraction(files, fallback).catch((err) =>
+        console.warn("Background fallback persistence failed:", err)
+      );
+
+      return NextResponse.json(fallback);
     }
 
     return NextResponse.json(

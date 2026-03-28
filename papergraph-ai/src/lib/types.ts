@@ -42,6 +42,12 @@ export interface AskResponse {
   answer: string;
 }
 
+// A single message in the live chat session.
+export interface ChatMessage {
+  role: "user" | "model";
+  text: string;
+}
+
 export const EMPTY_GRAPH: GraphData = {
   nodes: [],
   edges: [],

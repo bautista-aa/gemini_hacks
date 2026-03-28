@@ -37,13 +37,13 @@ export default function HistoryPanel({
 }: HistoryPanelProps) {
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-[28px] border border-gray-800/80 bg-gray-950/90 shadow-[0_18px_60px_rgba(0,0,0,0.38)]">
-      <div className="border-b border-gray-800/80 px-5 py-4">
-        <p className="text-xs font-semibold uppercase tracking-[0.22em] text-cyan-accent/85">
-          Saved Graphs
+      <div className="border-b border-gray-800/80 bg-[radial-gradient(circle_at_top_left,rgba(34,211,238,0.14),transparent_42%)] px-5 py-4">
+        <p className="text-xs font-semibold uppercase tracking-[0.22em] text-emerald-accent/85">
+          Saved Workspace
         </p>
-        <h2 className="mt-2 text-lg font-semibold text-gray-100">Graph History</h2>
+        <h2 className="mt-2 text-lg font-semibold text-gray-100">Saved Graphs</h2>
         <p className="mt-1 text-sm text-gray-500">
-          Re-open previously generated graphs.
+          Snapshots stay available here without removing the live graph from your workspace.
         </p>
       </div>
 
@@ -57,7 +57,7 @@ export default function HistoryPanel({
               onClick={() => onSelect(item.id)}
               className={`w-full rounded-2xl border p-3 text-left transition-colors duration-150 ${
                 active
-                  ? "border-cyan-accent/40 bg-cyan-accent/10"
+                  ? "border-emerald-accent/35 bg-gradient-to-r from-emerald-accent/12 to-cyan-accent/8"
                   : "border-gray-800 bg-gray-900/50 hover:border-gray-700"
               }`}
             >
@@ -82,7 +82,7 @@ export default function HistoryPanel({
           disabled={items.length === 0}
           className="w-full rounded-2xl border border-red-500/30 bg-red-500/10 px-3 py-2.5 text-sm font-medium text-red-200 transition-colors duration-150 hover:border-red-500/50 hover:bg-red-500/20 disabled:cursor-not-allowed disabled:opacity-40"
         >
-          Clear History
+          Clear Saved Graphs
         </button>
       </div>
     </div>
